@@ -168,10 +168,16 @@ function main()
 
     -- Playback loop
     lua_thread.create(function()
+        local lastFrameTime = os.clock() * 1000
         while true do
             wait(0)
+
+            local now = os.clock() * 1000
+            local dt  = now - lastFrameTime
+            lastFrameTime = now
+
             if playing and not paused and #current_route > 0 then
-                -- FIX: check bounds FIRST so current_route[play_index] is never nil
+                -- check bounds FIRST so current_route[play_index] is never nil
                 if play_index > #current_route then
                     if repeating then
                         play_index = 1
@@ -184,18 +190,49 @@ function main()
                     stopAll()
                     showMsg("~r~Vaziavimas sustabdytas - islejei masina!")
                 else
-                    local car = storeCarCharIsInNoSave(PLAYER_PED)
-                    local point = current_route[play_index]
+                    local car  = storeCarCharIsInNoSave(PLAYER_PED)
                     local carX, carY, carZ = getCarCoordinates(car)
 
-                    -- Lookahead steering — 3 waypoints ahead
-                    local lookAheadIdx   = math.min(play_index + 3, #current_route)
+                    -- After a lag spike (dt > 300 ms) or when the car has
+                    -- drifted far from the tracked point, scan up to 200
+                    -- waypoints forward to re-sync play_index with the car's
+                    -- actual position before doing anything else.
+                    local distToCurrent = getDistanceBetweenCoords2d(carX, carY,
+                        current_route[play_index].x, current_route[play_index].y)
+                    if dt > 300 or distToCurrent > 25 then
+                        local scanEnd    = math.min(play_index + 200, #current_route)
+                        local bestIdx    = play_index
+                        local bestDist   = distToCurrent
+                        for i = play_index, scanEnd do
+                            local p = current_route[i]
+                            local d = getDistanceBetweenCoords2d(carX, carY, p.x, p.y)
+                            if d < bestDist then
+                                bestDist = d
+                                bestIdx  = i
+                            end
+                        end
+                        play_index = bestIdx
+                    end
+
+                    local point = current_route[play_index]
+
+                    -- Distance-based lookahead: aim at the first waypoint that
+                    -- is at least 15 m ahead, up to 30 indices forward.
+                    -- At high speed this naturally extends the lookahead;
+                    -- at low speed it stays close — no fixed index+3 anymore.
+                    local lookAheadIdx = play_index
+                    for i = play_index, math.min(play_index + 30, #current_route) do
+                        if getDistanceBetweenCoords2d(carX, carY,
+                                current_route[i].x, current_route[i].y) >= 15.0 then
+                            lookAheadIdx = i
+                            break
+                        end
+                    end
                     local lookAheadPoint = current_route[lookAheadIdx]
-                    -- FIX: pass the waypoint's z to draw_line
                     draw_line(lookAheadPoint.x, lookAheadPoint.y, lookAheadPoint.z)
                     turning_mechanism(lookAheadPoint.x, lookAheadPoint.y, carX, carY, car)
 
-                    -- FIX: dead-band ±3 km/h prevents gas/brake oscillation;
+                    -- dead-band ±3 km/h prevents gas/brake oscillation;
                     -- coast zone explicitly releases both to avoid state bleed
                     local currentSpeed = getCarSpeed(car)
                     if currentSpeed < point.speed - 3 then
@@ -208,13 +245,13 @@ function main()
 
                     printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed) .. 'km/h', 100)
 
-                    -- Waypoint check with closest-point skip logic
+                    -- Normal per-frame waypoint advancement (20-point window)
                     if locateCharInCar2d(PLAYER_PED, point.x, point.y, routeRadius, routeRadius, false) then
                         play_index = play_index + 1
                     else
                         local closestIdx  = play_index
                         local closestDist = getDistanceBetweenCoords2d(carX, carY, point.x, point.y)
-                        for i = play_index, math.min(play_index + 10, #current_route) do
+                        for i = play_index, math.min(play_index + 20, #current_route) do
                             local p = current_route[i]
                             local d = getDistanceBetweenCoords2d(carX, carY, p.x, p.y)
                             if d < closestDist then
@@ -229,6 +266,10 @@ function main()
                         repairCar(car)
                     end
                 end
+            else
+                -- keep lastFrameTime fresh so the first frame after unpausing
+                -- doesn't misread the idle gap as a lag spike
+                lastFrameTime = now
             end
         end
     end)
