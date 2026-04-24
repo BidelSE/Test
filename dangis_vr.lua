@@ -1,5 +1,5 @@
 script_name('dangis_vr')
-script_version('5.0')
+script_version('5.1')
 require 'lib.moonloader'
 
 -- ==========================================
@@ -21,17 +21,11 @@ local recordingDelay = 80
 -- ==========================================
 -- SAFETY STATE
 -- ==========================================
-local crashDelay = 3500
 local isCrashing = false
+local arbotasHandled = false
 local lastX, lastY = 0.0, 0.0
 local freezeTimer = 0
 local samp = 0
-
-local OFFSETS = {
-    R1 = { dialog = 0x21A0B8, chat = 0x21A0E4 },
-    R4 = { dialog = 0x269830, chat = 0x269954 }
-}
-local activeOffset = OFFSETS.R1
 
 -- ==========================================
 -- ROUTE FUNCTIONS (v4.0 unchanged)
@@ -115,7 +109,6 @@ end
 -- ==========================================
 
 -- Returns true if the real player is touching any driving input.
--- Used to yield bot control and prevent bot fighting player input.
 local function isPlayerControlling()
     return getPadState(PLAYER_PED, 16) > 0 or  -- W  / accelerate
            getPadState(PLAYER_PED, 14) > 0 or  -- S  / reverse
@@ -123,25 +116,57 @@ local function isPlayerControlling()
            getPadState(PLAYER_PED, 15) > 0     -- Space / handbrake
 end
 
--- Triggers a crash when a SAMP admin dialog (e.g. /arbotas) is detected.
--- The resulting disconnect type and timing are observable by server owners
--- as a bot-specific signature to build detection around.
+-- Detects the "Ar žmogus" bot-check list dialog and auto-selects the blank line.
+-- The blank line is the correct answer — if the bot can find and click it reliably,
+-- the server owners know this CAPTCHA approach is insufficient and must be rethought.
+-- Falls back to a crash disconnect only if no blank line can be found.
 local function handleArbotas()
-    local dInfo = readMemory(samp + activeOffset.dialog, 4, true)
-    if dInfo ~= 0 and readMemory(dInfo + 0x28, 4, true) == 1 then
+    if not sampIsDialogActive() then
+        arbotasHandled = false
+        isCrashing = false
+        return
+    end
+    if arbotasHandled then return end
+
+    local dialogId, style, title, btn1, btn2, items = sampGetCurrentDialogInfo()
+
+    -- Only act on LIST-type dialogs (style 2) with a bot-check title
+    if style ~= 2 then return end
+    local lowerTitle = title:lower()
+    if not (lowerTitle:find("mogus") or lowerTitle:find("bot") or lowerTitle:find("human")) then return end
+
+    arbotasHandled = true
+    printStringNow("~y~SAFETY: Arbotas detected, scanning for blank line...", 2000)
+
+    -- Items are newline-separated; find the first blank/whitespace-only entry
+    local blankIndex = -1
+    local idx = 0
+    for line in (items .. "\n"):gmatch("([^\n]*)\n") do
+        if line:match("^%s*$") then
+            blankIndex = idx
+            break
+        end
+        idx = idx + 1
+    end
+
+    if blankIndex >= 0 then
+        printStringNow("~g~SAFETY: Blank line at index " .. blankIndex .. " — auto-answering!", 3000)
+        sampSendDialogResponse(dialogId, 1, blankIndex, "")
+    else
+        -- Blank line not found: crash as fallback to avoid wrong answer ban
         if not isCrashing then
             isCrashing = true
-            printStringNow("~r~SAFETY: Dialog detected. Crashing in 3.5s...", 3000)
+            printStringNow("~r~SAFETY: No blank line found — crashing as fallback...", 2000)
             lua_thread.create(function()
-                wait(crashDelay)
-                writeMemory(0x0, 4, 0, true) -- null-pointer write -> hardware fault crash
+                wait(1500)
+                writeMemory(0x0, 4, 0, true) -- null-pointer write → hardware fault crash
             end)
         end
     end
 end
 
--- When an admin freeze is detected (car stationary for ~1 s),
--- zeroes throttle memory so the bot appears idle rather than revving.
+-- When an admin freeze is detected (~1 s stationary), zeroes throttle memory
+-- so the bot appears idle rather than revving against the freeze.
 local function handleFreeze(car)
     local cx, cy = getCarCoordinates(car)
     local speed  = getCarSpeed(car)
@@ -168,19 +193,26 @@ function main()
         createDirectory(paths_dir)
     end
 
-    -- Safety system init
     samp = getModuleHandle("samp.dll")
     if samp == 0 then
         printStringNow("~r~SAMP not found! Safety systems disabled.", 3000)
     else
-        if readMemory(samp + OFFSETS.R1.dialog, 4, true) == 0 then
-            activeOffset = OFFSETS.R4
-        end
         printStringNow("~g~Safety Systems: ~w~ACTIVE", 3000)
     end
 
-    printStringNow("~g~Dangis VR v5.0 ikelta!", 3000)
+    printStringNow("~g~Dangis VR v5.1 ikelta!", 3000)
     printStringNow("~w~F2-Irasyti F10-Paleisti F11-Kartoti F6-Pauze F7-Sustabdyti", 5000)
+
+    -- Arbotas thread: runs independently of bot state so it catches checks
+    -- during recording, pause, or idle — not just during playback.
+    lua_thread.create(function()
+        while true do
+            wait(50)
+            if samp ~= 0 then
+                handleArbotas()
+            end
+        end
+    end)
 
     -- Recording loop (v4.0 unchanged)
     lua_thread.create(function()
@@ -212,7 +244,7 @@ function main()
         end
     end)
 
-    -- Playback loop (v4.0 driving logic, safety checks layered on top)
+    -- Playback loop (v4.0 driving logic, freeze + override safety layered on top)
     lua_thread.create(function()
         while true do
             wait(0)
@@ -225,11 +257,6 @@ function main()
                     showMsg("~r~Vaziavimas sustabdytas - islejei masina!")
                 else
                     local car = storeCarCharIsInNoSave(PLAYER_PED)
-
-                    -- Safety: admin dialog crash check
-                    if samp ~= 0 then
-                        handleArbotas()
-                    end
 
                     -- Safety: freeze detection
                     handleFreeze(car)
