@@ -175,6 +175,8 @@ end
 
 -- Detects the "Ar žmogus" list dialog and auto-selects the blank line after a
 -- human-realistic reading delay (2.5–7 s). Crash is fallback if no blank found.
+-- Uses individual SAMP getters (sampGetCurrentDialogType/Caption/Text) since
+-- the all-in-one sampGetCurrentDialogInfo isn't exposed in moonloader 0.27.x.
 local function handleArbotas()
     if not sampIsDialogActive() then
         arbotasHandled = false
@@ -183,27 +185,42 @@ local function handleArbotas()
     end
     if arbotasHandled then return end
 
-    local dialogId, style, title, btn1, btn2, items = sampGetCurrentDialogInfo()
-    if style ~= 2 then return end
+    local style = sampGetCurrentDialogType()
+    if style ~= 2 then return end -- only LIST dialogs
+
+    local title = sampGetCurrentDialogCaption() or ""
     local lowerTitle = title:lower()
     if not (lowerTitle:find("mogus") or lowerTitle:find("bot") or lowerTitle:find("human")) then return end
 
     arbotasHandled = true
     printStringNow("~y~SAFETY: Arbotas detected, scanning items...", 2000)
 
+    -- Find blank line. Prefer per-item iteration if available; fall back to
+    -- splitting the full dialog text by newlines.
     local blankIndex = -1
-    local idx = 0
-    for line in (items .. "\n"):gmatch("([^\n]*)\n") do
-        if line:match("^%s*$") then
-            blankIndex = idx
-            break
+    if sampGetCurrentDialogListItemCount and sampGetCurrentDialogListItem then
+        local count = sampGetCurrentDialogListItemCount()
+        for i = 0, count - 1 do
+            local item = sampGetCurrentDialogListItem(i) or ""
+            if item:match("^%s*$") then
+                blankIndex = i
+                break
+            end
         end
-        idx = idx + 1
+    else
+        local items = sampGetCurrentDialogText() or ""
+        local idx = 0
+        for line in (items .. "\n"):gmatch("([^\n]*)\n") do
+            if line:match("^%s*$") then
+                blankIndex = idx
+                break
+            end
+            idx = idx + 1
+        end
     end
 
     if blankIndex >= 0 then
-        -- Delay answer to match human reading speed (2.5–7 seconds)
-        local capturedId = dialogId
+        local capturedId = sampGetCurrentDialogId()
         local capturedIdx = blankIndex
         lua_thread.create(function()
             local delay = math.random(2500, 7000)
