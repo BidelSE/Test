@@ -166,11 +166,15 @@ end
 -- SAFETY FUNCTIONS
 -- ==========================================
 
+-- Uses raw Windows key state (isKeyDown) so detection is independent of what
+-- the bot writes to game memory via setGameKeyState/writeMemory each frame.
+-- getPadState reads the processed game pad buffer which the bot pollutes.
 local function isPlayerControlling()
-    return getPadState(PLAYER_PED, 16) > 0 or
-           getPadState(PLAYER_PED, 14) > 0 or
-           getPadState(PLAYER_PED, 0)  ~= 0 or
-           getPadState(PLAYER_PED, 15) > 0
+    return isKeyDown(0x57) or  -- W
+           isKeyDown(0x53) or  -- S
+           isKeyDown(0x41) or  -- A
+           isKeyDown(0x44) or  -- D
+           isKeyDown(0x20)     -- Space
 end
 
 -- Detects the "Ar žmogus" list dialog and auto-selects the blank line after a
