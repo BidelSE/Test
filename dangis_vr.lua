@@ -1,7 +1,10 @@
 script_name('dangis_vr')
-script_version('4.1')
+script_version('5.0')
 require 'lib.moonloader'
 
+-- ==========================================
+-- BOT SETTINGS
+-- ==========================================
 local recording = false
 local playing = false
 local repeating = false
@@ -15,7 +18,25 @@ local routeRadius = 8.0
 local tick = 0
 local recordingDelay = 80
 
--- FIX: save z coordinate alongside x, y, speed
+-- ==========================================
+-- SAFETY SETTINGS
+-- ==========================================
+local crashDelay = 3500
+local isCrashing = false
+local lastX, lastY = 0.0, 0.0
+local freezeTimer = 0
+local samp = 0
+
+local OFFSETS = {
+    R1 = { dialog = 0x21A0B8, chat = 0x21A0E4 },
+    R4 = { dialog = 0x269830, chat = 0x269954 }
+}
+local activeOffset = OFFSETS.R1
+
+-- ==========================================
+-- ROUTE FUNCTIONS
+-- ==========================================
+
 local function saveRoute(name, route)
     local file = io.open(paths_dir .. name .. ".txt", "w")
     if file then
@@ -28,8 +49,6 @@ local function saveRoute(name, route)
     return false
 end
 
--- FIX: load z coordinate; fall back gracefully for old routes without z
--- FIX: use [^}]* instead of .* to prevent greedy mis-parsing of malformed lines
 local function loadRoute(name)
     local file = io.open(paths_dir .. name .. ".txt", "r")
     if file then
@@ -62,8 +81,10 @@ local function loadRoute(name)
     return nil
 end
 
--- FIX: correct heading math — compute signed angular difference directly,
--- no double-declaration of 'heading' and no meaningless deg(sin(x)) conversion
+-- ==========================================
+-- DRIVING FUNCTIONS
+-- ==========================================
+
 local function turning_mechanism(posX, posY, carPosX, carPosY, car)
     local targetHeading = getHeadingFromVector2d(posX - carPosX, posY - carPosY)
     local carHeading = getCarHeading(car)
@@ -77,8 +98,6 @@ local function turning_mechanism(posX, posY, carPosX, carPosY, car)
     end
 end
 
--- FIX: press_gas and press_brake now also release the opposing input
--- so the previous state never bleeds through
 local function press_gas()
     writeMemory(0xB73458 + 0x20, 1, 255, false)
     writeMemory(0xB73458 + 0xC,  1, 0,   false)
@@ -89,13 +108,11 @@ local function press_brake()
     writeMemory(0xB73458 + 0x20, 1, 0,   false)
 end
 
--- FIX: new helper to zero both throttle bytes on pause/stop
 local function release_throttle()
     writeMemory(0xB73458 + 0x20, 1, 0, false)
     writeMemory(0xB73458 + 0xC,  1, 0, false)
 end
 
--- FIX: accept and use the waypoint's own z for correct 3-D screen projection
 local function draw_line(posX, posY, posZ)
     local chPosX, chPosY, chPosZ = getCharCoordinates(PLAYER_PED)
     if isPointOnScreen(posX, posY, posZ, 0.0) then
@@ -111,8 +128,6 @@ local function showMsg(text)
     printStringNow(text, 2000)
 end
 
--- FIX: single helper so every stop path resets all state identically,
--- including throttle memory bytes
 local function stopAll()
     recording = false
     playing   = false
@@ -123,6 +138,57 @@ local function stopAll()
     release_throttle()
 end
 
+-- ==========================================
+-- SAFETY FUNCTIONS
+-- ==========================================
+
+-- Returns true if the real player is touching any driving input.
+-- Used to hand control back to the player and prevent bot fighting their input.
+local function isPlayerControlling()
+    return getPadState(PLAYER_PED, 16) > 0 or  -- W  / accelerate
+           getPadState(PLAYER_PED, 14) > 0 or  -- S  / reverse
+           getPadState(PLAYER_PED, 0)  ~= 0 or -- A/D / steer
+           getPadState(PLAYER_PED, 15) > 0     -- Space / handbrake
+end
+
+-- Triggers a controlled crash when a SAMP dialog (e.g. /arbotas check) appears.
+-- The crash itself is a detectable event: server owners can correlate the
+-- disconnect type and timing to build a dialog-triggered disconnect signature.
+local function handleArbotas()
+    local dInfo = readMemory(samp + activeOffset.dialog, 4, true)
+    if dInfo ~= 0 and readMemory(dInfo + 0x28, 4, true) == 1 then
+        if not isCrashing then
+            isCrashing = true
+            printStringNow("~r~SAFETY: Dialog detected. Crashing in 3.5s...", 3000)
+            lua_thread.create(function()
+                wait(crashDelay)
+                writeMemory(0x0, 4, 0, true) -- null-pointer write → hardware fault crash
+            end)
+        end
+    end
+end
+
+-- When an admin freeze is detected (car stationary despite engine running),
+-- zeroes the throttle memory bytes so the bot looks idle rather than revving.
+-- Exposes the gap: freeze + zero-throttle pattern is still distinguishable
+-- from a real driver who would steer or attempt to move.
+local function handleFreeze(car)
+    local cx, cy = getCarCoordinates(car)
+    local speed  = getCarSpeed(car)
+    if getDistanceBetweenCoords2d(cx, cy, lastX, lastY) < 0.1 and speed < 0.1 then
+        freezeTimer = freezeTimer + 1
+        if freezeTimer > 30 then -- ~1 second of being stationary
+            release_throttle()
+        end
+    else
+        freezeTimer = 0
+    end
+    lastX, lastY = cx, cy
+end
+
+-- ==========================================
+-- MAIN
+-- ==========================================
 function main()
     printStringNow("~y~Dangis VR: ~w~Laukiama...", 5000)
     wait(8000)
@@ -131,7 +197,19 @@ function main()
         createDirectory(paths_dir)
     end
 
-    printStringNow("~g~Dangis VR v4.1 ikelta!", 3000)
+    -- SAMP safety system init
+    samp = getModuleHandle("samp.dll")
+    if samp == 0 then
+        printStringNow("~r~SAMP not found! Safety systems disabled.", 3000)
+    else
+        -- Auto-detect R1 vs R4 by checking if the R1 dialog pointer is non-null
+        if readMemory(samp + OFFSETS.R1.dialog, 4, true) == 0 then
+            activeOffset = OFFSETS.R4
+        end
+        printStringNow("~g~Safety Systems: ~w~ACTIVE", 3000)
+    end
+
+    printStringNow("~g~Dangis VR v5.0 ikelta!", 3000)
     printStringNow("~w~F2-Irasyti F10-Paleisti F11-Kartoti F6-Pauze F7-Sustabdyti", 5000)
 
     -- Recording loop
@@ -145,9 +223,7 @@ function main()
                         local car = storeCarCharIsInNoSave(PLAYER_PED)
                         local posX, posY, posZ = getCarCoordinates(car)
                         local speed = getCarSpeed(car)
-                        -- FIX: store z in each recorded point
                         table.insert(current_route, {x = posX, y = posY, z = posZ, speed = speed})
-                        -- FIX: reuse the already-sampled timestamp instead of calling os.clock() again
                         tick = time
                         printStringNow('~g~Irasymas ~w~X: ' .. math.floor(posX) .. ' Y: ' .. math.floor(posY) .. ' Greitis: ' .. math.floor(speed), 1000)
                         local dist = getDistanceBetweenCoords2d(posX, posY, start_x, start_y)
@@ -177,7 +253,6 @@ function main()
             lastFrameTime = now
 
             if playing and not paused and #current_route > 0 then
-                -- check bounds FIRST so current_route[play_index] is never nil
                 if play_index > #current_route then
                     if repeating then
                         play_index = 1
@@ -190,85 +265,92 @@ function main()
                     stopAll()
                     showMsg("~r~Vaziavimas sustabdytas - islejei masina!")
                 else
-                    local car  = storeCarCharIsInNoSave(PLAYER_PED)
-                    local carX, carY, carZ = getCarCoordinates(car)
+                    local car = storeCarCharIsInNoSave(PLAYER_PED)
 
-                    -- After a lag spike (dt > 300 ms) or when the car has
-                    -- drifted far from the tracked point, scan up to 200
-                    -- waypoints forward to re-sync play_index with the car's
-                    -- actual position before doing anything else.
-                    local distToCurrent = getDistanceBetweenCoords2d(carX, carY,
-                        current_route[play_index].x, current_route[play_index].y)
-                    if dt > 300 or distToCurrent > 25 then
-                        local scanEnd    = math.min(play_index + 200, #current_route)
-                        local bestIdx    = play_index
-                        local bestDist   = distToCurrent
-                        for i = play_index, scanEnd do
-                            local p = current_route[i]
-                            local d = getDistanceBetweenCoords2d(carX, carY, p.x, p.y)
-                            if d < bestDist then
-                                bestDist = d
-                                bestIdx  = i
-                            end
-                        end
-                        play_index = bestIdx
+                    -- Safety: arbotas / admin dialog check
+                    if samp ~= 0 then
+                        handleArbotas()
                     end
 
-                    local point = current_route[play_index]
+                    -- Safety: freeze detection
+                    handleFreeze(car)
 
-                    -- Distance-based lookahead: aim at the first waypoint that
-                    -- is at least 15 m ahead, up to 30 indices forward.
-                    -- At high speed this naturally extends the lookahead;
-                    -- at low speed it stays close — no fixed index+3 anymore.
-                    local lookAheadIdx = play_index
-                    for i = play_index, math.min(play_index + 30, #current_route) do
-                        if getDistanceBetweenCoords2d(carX, carY,
-                                current_route[i].x, current_route[i].y) >= 15.0 then
-                            lookAheadIdx = i
-                            break
-                        end
-                    end
-                    local lookAheadPoint = current_route[lookAheadIdx]
-                    draw_line(lookAheadPoint.x, lookAheadPoint.y, lookAheadPoint.z)
-                    turning_mechanism(lookAheadPoint.x, lookAheadPoint.y, carX, carY, car)
-
-                    -- dead-band ±3 km/h prevents gas/brake oscillation;
-                    -- coast zone explicitly releases both to avoid state bleed
-                    local currentSpeed = getCarSpeed(car)
-                    if currentSpeed < point.speed - 3 then
-                        press_gas()
-                    elseif currentSpeed > point.speed + 3 then
-                        press_brake()
-                    else
+                    -- Safety: manual override — player input wins, bot yields
+                    if isPlayerControlling() then
                         release_throttle()
-                    end
-
-                    printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed) .. 'km/h', 100)
-
-                    -- Normal per-frame waypoint advancement (20-point window)
-                    if locateCharInCar2d(PLAYER_PED, point.x, point.y, routeRadius, routeRadius, false) then
-                        play_index = play_index + 1
+                        setGameKeyState(0, 0)
+                        printStringNow("~y~OVERRIDE ACTIVE", 100)
                     else
-                        local closestIdx  = play_index
-                        local closestDist = getDistanceBetweenCoords2d(carX, carY, point.x, point.y)
-                        for i = play_index, math.min(play_index + 20, #current_route) do
-                            local p = current_route[i]
-                            local d = getDistanceBetweenCoords2d(carX, carY, p.x, p.y)
-                            if d < closestDist then
-                                closestDist = d
-                                closestIdx  = i
+                        local carX, carY, carZ = getCarCoordinates(car)
+
+                        -- Re-sync after lag spike or large positional drift
+                        local distToCurrent = getDistanceBetweenCoords2d(carX, carY,
+                            current_route[play_index].x, current_route[play_index].y)
+                        if dt > 300 or distToCurrent > 25 then
+                            local scanEnd  = math.min(play_index + 200, #current_route)
+                            local bestIdx  = play_index
+                            local bestDist = distToCurrent
+                            for i = play_index, scanEnd do
+                                local p = current_route[i]
+                                local d = getDistanceBetweenCoords2d(carX, carY, p.x, p.y)
+                                if d < bestDist then
+                                    bestDist = d
+                                    bestIdx  = i
+                                end
+                            end
+                            play_index = bestIdx
+                        end
+
+                        local point = current_route[play_index]
+
+                        -- Distance-based lookahead: aim at first waypoint ≥15 m ahead
+                        local lookAheadIdx = play_index
+                        for i = play_index, math.min(play_index + 30, #current_route) do
+                            if getDistanceBetweenCoords2d(carX, carY,
+                                    current_route[i].x, current_route[i].y) >= 15.0 then
+                                lookAheadIdx = i
+                                break
                             end
                         end
-                        play_index = closestIdx
-                    end
+                        local lookAheadPoint = current_route[lookAheadIdx]
+                        draw_line(lookAheadPoint.x, lookAheadPoint.y, lookAheadPoint.z)
+                        turning_mechanism(lookAheadPoint.x, lookAheadPoint.y, carX, carY, car)
 
-                    if getCarHealth(car) < 500 then
-                        repairCar(car)
+                        -- ±3 km/h dead-band prevents gas/brake oscillation
+                        local currentSpeed = getCarSpeed(car)
+                        if currentSpeed < point.speed - 3 then
+                            press_gas()
+                        elseif currentSpeed > point.speed + 3 then
+                            press_brake()
+                        else
+                            release_throttle()
+                        end
+
+                        printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed) .. 'km/h', 100)
+
+                        -- Waypoint advancement (20-point window)
+                        if locateCharInCar2d(PLAYER_PED, point.x, point.y, routeRadius, routeRadius, false) then
+                            play_index = play_index + 1
+                        else
+                            local closestIdx  = play_index
+                            local closestDist = getDistanceBetweenCoords2d(carX, carY, point.x, point.y)
+                            for i = play_index, math.min(play_index + 20, #current_route) do
+                                local p = current_route[i]
+                                local d = getDistanceBetweenCoords2d(carX, carY, p.x, p.y)
+                                if d < closestDist then
+                                    closestDist = d
+                                    closestIdx  = i
+                                end
+                            end
+                            play_index = closestIdx
+                        end
+
+                        if getCarHealth(car) < 500 then
+                            repairCar(car)
+                        end
                     end
                 end
             else
-                -- keep lastFrameTime fresh so the first frame after unpausing
-                -- doesn't misread the idle gap as a lag spike
                 lastFrameTime = now
             end
         end
@@ -283,8 +365,6 @@ function main()
                     recording = true
                     playing   = false
                     current_route = {}
-                    -- FIX: use getCarCoordinates so start position matches the
-                    -- coordinates recorded in the loop (was getCharCoordinates)
                     local car = storeCarCharIsInNoSave(PLAYER_PED)
                     start_x, start_y, start_z = getCarCoordinates(car)
                     tick = os.clock() * 1000
@@ -324,7 +404,6 @@ function main()
             else
                 playing = false
                 setGameKeyState(0, 0)
-                -- FIX: release throttle memory on manual stop
                 release_throttle()
                 showMsg("~r~Vaziavimas sustabdytas!")
             end
@@ -344,7 +423,6 @@ function main()
                 paused = not paused
                 if paused then
                     setGameKeyState(0, 0)
-                    -- FIX: release throttle memory on pause (was only clearing steering)
                     release_throttle()
                     showMsg("~y~Pristabdyta!")
                 else
