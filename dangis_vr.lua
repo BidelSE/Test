@@ -1,5 +1,5 @@
 script_name('dangis_vr')
-script_version('5.1')
+script_version('5.2')
 require 'lib.moonloader'
 
 -- ==========================================
@@ -25,7 +25,20 @@ local isCrashing = false
 local arbotasHandled = false
 local lastX, lastY = 0.0, 0.0
 local freezeTimer = 0
+local freezeChatSent = false
 local samp = 0
+
+-- ==========================================
+-- HUMANIZATION STATE
+-- ==========================================
+local speedVariance = 0.0       -- re-rolled ±7% each lap
+local lastSteerValue = 0        -- tracks what turning_mechanism last set
+local steerNoiseValue = 0       -- current noise offset being applied
+local steerNoiseDuration = 0    -- frames remaining for active noise
+local steerNoiseCooldown = 0    -- frames until next noise is allowed
+local collisionCooldown = 0     -- frames remaining in collision-avoid mode
+
+local freezeChatResponses = { "?", "lag?", "wtf", "bruh", "??" }
 
 -- ==========================================
 -- ROUTE FUNCTIONS (v4.0 unchanged)
@@ -65,17 +78,21 @@ end
 
 -- ==========================================
 -- DRIVING FUNCTIONS (v4.0 unchanged)
+-- lastSteerValue tracking added so humanization layer can read what was set
 -- ==========================================
 
 local function turning_mechanism(posX, posY, carPosX, carPosY, car)
     local heading = math.rad(getHeadingFromVector2d(posX - carPosX, posY - carPosY) + math.abs(getCarHeading(car) - 360.0))
     local heading = getHeadingFromVector2d(math.deg(math.sin(heading)), math.deg(math.cos(heading)))
     if heading > 180.0 and 355.0 > heading then
+        lastSteerValue = -128
         setGameKeyState(0, -128)
     else
         if heading > 5.0 and 180.0 >= heading then
+            lastSteerValue = 128
             setGameKeyState(0, 128)
         else
+            lastSteerValue = 0
             setGameKeyState(0, 0)
         end
     end
@@ -105,21 +122,59 @@ local function showMsg(text)
 end
 
 -- ==========================================
+-- HUMANIZATION FUNCTIONS
+-- ==========================================
+
+-- Applies a brief random steering perturbation after turning_mechanism has set
+-- its value. Noise lasts 2–6 frames then cools down 8–30 frames before repeating.
+-- Mimics the micro-corrections a human makes constantly while driving.
+local function applySteerNoise()
+    if steerNoiseDuration > 0 then
+        steerNoiseDuration = steerNoiseDuration - 1
+        local clamped = math.max(-128, math.min(128, lastSteerValue + steerNoiseValue))
+        setGameKeyState(0, clamped)
+    elseif steerNoiseCooldown > 0 then
+        steerNoiseCooldown = steerNoiseCooldown - 1
+    elseif math.random(100) <= 10 then
+        -- Larger noise on straights (±25), gentler noise mid-turn (±12)
+        local range = (lastSteerValue == 0) and 25 or 12
+        steerNoiseValue = math.random(-range, range)
+        steerNoiseDuration = math.random(2, 6)
+        steerNoiseCooldown = math.random(8, 30)
+        local clamped = math.max(-128, math.min(128, lastSteerValue + steerNoiseValue))
+        setGameKeyState(0, clamped)
+    end
+end
+
+-- Checks for a vehicle within 5 units of a point 12 units ahead in the
+-- direction of the next waypoint. Uses pcall so a missing getClosestCar
+-- implementation degrades gracefully to no collision avoidance.
+local function hasObstacleAhead(car, targetX, targetY)
+    local carX, carY, carZ = getCarCoordinates(car)
+    local dx = targetX - carX
+    local dy = targetY - carY
+    local dist = math.sqrt(dx * dx + dy * dy)
+    if dist < 0.1 then return false end
+    local nx, ny = dx / dist, dy / dist
+    local aheadX = carX + nx * 12
+    local aheadY = carY + ny * 12
+    local ok, nearest = pcall(getClosestCar, aheadX, aheadY, carZ, 5.0, {}, 0)
+    return ok and nearest and nearest ~= 0 and nearest ~= car
+end
+
+-- ==========================================
 -- SAFETY FUNCTIONS
 -- ==========================================
 
--- Returns true if the real player is touching any driving input.
 local function isPlayerControlling()
-    return getPadState(PLAYER_PED, 16) > 0 or  -- W  / accelerate
-           getPadState(PLAYER_PED, 14) > 0 or  -- S  / reverse
-           getPadState(PLAYER_PED, 0)  ~= 0 or -- A/D / steer
-           getPadState(PLAYER_PED, 15) > 0     -- Space / handbrake
+    return getPadState(PLAYER_PED, 16) > 0 or
+           getPadState(PLAYER_PED, 14) > 0 or
+           getPadState(PLAYER_PED, 0)  ~= 0 or
+           getPadState(PLAYER_PED, 15) > 0
 end
 
--- Detects the "Ar žmogus" bot-check list dialog and auto-selects the blank line.
--- The blank line is the correct answer — if the bot can find and click it reliably,
--- the server owners know this CAPTCHA approach is insufficient and must be rethought.
--- Falls back to a crash disconnect only if no blank line can be found.
+-- Detects the "Ar žmogus" list dialog and auto-selects the blank line after a
+-- human-realistic reading delay (2.5–7 s). Crash is fallback if no blank found.
 local function handleArbotas()
     if not sampIsDialogActive() then
         arbotasHandled = false
@@ -129,16 +184,13 @@ local function handleArbotas()
     if arbotasHandled then return end
 
     local dialogId, style, title, btn1, btn2, items = sampGetCurrentDialogInfo()
-
-    -- Only act on LIST-type dialogs (style 2) with a bot-check title
     if style ~= 2 then return end
     local lowerTitle = title:lower()
     if not (lowerTitle:find("mogus") or lowerTitle:find("bot") or lowerTitle:find("human")) then return end
 
     arbotasHandled = true
-    printStringNow("~y~SAFETY: Arbotas detected, scanning for blank line...", 2000)
+    printStringNow("~y~SAFETY: Arbotas detected, scanning items...", 2000)
 
-    -- Items are newline-separated; find the first blank/whitespace-only entry
     local blankIndex = -1
     local idx = 0
     for line in (items .. "\n"):gmatch("([^\n]*)\n") do
@@ -150,10 +202,19 @@ local function handleArbotas()
     end
 
     if blankIndex >= 0 then
-        printStringNow("~g~SAFETY: Blank line at index " .. blankIndex .. " — auto-answering!", 3000)
-        sampSendDialogResponse(dialogId, 1, blankIndex, "")
+        -- Delay answer to match human reading speed (2.5–7 seconds)
+        local capturedId = dialogId
+        local capturedIdx = blankIndex
+        lua_thread.create(function()
+            local delay = math.random(2500, 7000)
+            printStringNow("~y~SAFETY: Answering arbotas in ~" .. math.floor(delay / 1000) .. "s", 3000)
+            wait(delay)
+            if sampIsDialogActive() then
+                sampSendDialogResponse(capturedId, 1, capturedIdx, "")
+                printStringNow("~g~SAFETY: Arbotas answered (blank line " .. capturedIdx .. ")", 2000)
+            end
+        end)
     else
-        -- Blank line not found: crash as fallback to avoid wrong answer ban
         if not isCrashing then
             isCrashing = true
             printStringNow("~r~SAFETY: No blank line found — crashing as fallback...", 2000)
@@ -165,8 +226,9 @@ local function handleArbotas()
     end
 end
 
--- When an admin freeze is detected (~1 s stationary), zeroes throttle memory
--- so the bot appears idle rather than revving against the freeze.
+-- When frozen (~1 s stationary): zeroes throttle memory, sends occasional
+-- input twitches every ~3 s and one natural chat message after 3 s to mimic
+-- a confused human realising they cannot move.
 local function handleFreeze(car)
     local cx, cy = getCarCoordinates(car)
     local speed  = getCarSpeed(car)
@@ -175,9 +237,32 @@ local function handleFreeze(car)
         if freezeTimer > 30 then
             writeMemory(0xB73458 + 0x20, 1, 0, false)
             writeMemory(0xB73458 + 0xC,  1, 0, false)
+
+            -- Send one chat message ~3 s into the freeze
+            if freezeTimer == 90 and not freezeChatSent then
+                freezeChatSent = true
+                local msg = freezeChatResponses[math.random(#freezeChatResponses)]
+                sampSendChat(msg)
+            end
+
+            -- Random input twitch roughly every 3 s (180 frames) with ±20% jitter
+            local twitchInterval = math.random(150, 210)
+            if freezeTimer % twitchInterval == 0 then
+                local kind = math.random(3)
+                if kind == 1 then
+                    -- Brief gas tap
+                    writeMemory(0xB73458 + 0x20, 1, math.random(80, 160), false)
+                elseif kind == 2 then
+                    -- Brief steer twitch
+                    local dir = math.random(2) == 1 and math.random(30, 60) or math.random(-60, -30)
+                    setGameKeyState(0, dir)
+                end
+                -- Input resets naturally next frame from the zero-writes above
+            end
         end
     else
         freezeTimer = 0
+        freezeChatSent = false
     end
     lastX, lastY = cx, cy
 end
@@ -197,14 +282,13 @@ function main()
     if samp == 0 then
         printStringNow("~r~SAMP not found! Safety systems disabled.", 3000)
     else
-        printStringNow("~g~Safety Systems: ~w~ACTIVE", 3000)
+        printStringNow("~g~Safety Systems + Humanization: ~w~ACTIVE", 3000)
     end
 
-    printStringNow("~g~Dangis VR v5.1 ikelta!", 3000)
+    printStringNow("~g~Dangis VR v5.2 ikelta!", 3000)
     printStringNow("~w~F2-Irasyti F10-Paleisti F11-Kartoti F6-Pauze F7-Sustabdyti", 5000)
 
-    -- Arbotas thread: runs independently of bot state so it catches checks
-    -- during recording, pause, or idle — not just during playback.
+    -- Arbotas thread (independent — fires during recording, pause, idle, playback)
     lua_thread.create(function()
         while true do
             wait(50)
@@ -244,7 +328,7 @@ function main()
         end
     end)
 
-    -- Playback loop (v4.0 driving logic, freeze + override safety layered on top)
+    -- Playback loop
     lua_thread.create(function()
         while true do
             wait(0)
@@ -258,33 +342,55 @@ function main()
                 else
                     local car = storeCarCharIsInNoSave(PLAYER_PED)
 
-                    -- Safety: freeze detection
+                    -- Safety: freeze detection + humanization
                     handleFreeze(car)
 
-                    -- Safety: manual override — player input wins, bot yields
+                    -- Safety: manual override
                     if isPlayerControlling() then
                         writeMemory(0xB73458 + 0x20, 1, 0, false)
                         writeMemory(0xB73458 + 0xC,  1, 0, false)
                         setGameKeyState(0, 0)
                         printStringNow("~y~OVERRIDE ACTIVE", 100)
                     else
-                        -- v4.0 driving logic (unchanged)
                         local point = current_route[play_index]
                         local carX, carY, carZ = getCarCoordinates(car)
 
+                        -- v4.0 driving: steering and line draw
                         draw_line(point.x, point.y)
                         turning_mechanism(point.x, point.y, carX, carY, car)
 
+                        -- Humanization: micro steering noise applied after base steering
+                        applySteerNoise()
+
+                        -- Humanization: speed variance
+                        -- speedVariance is a per-lap offset (±7%) rolled on loop restart.
+                        -- Small per-frame noise (±2 units) added on top.
+                        local frameNoise = math.random(-2, 2)
+                        local targetSpeed = point.speed * (1.0 + speedVariance) + frameNoise
                         local currentSpeed = getCarSpeed(car)
-                        if currentSpeed < point.speed + 0.2 then
-                            press_gas()
-                        else
+
+                        -- Anti-collision: if a vehicle is ahead, brake and ease right
+                        if collisionCooldown > 0 then
+                            collisionCooldown = collisionCooldown - 1
                             press_brake()
+                            if collisionCooldown > 30 then
+                                setGameKeyState(0, 55) -- mild right steer to go around
+                            end
+                        else
+                            if hasObstacleAhead(car, point.x, point.y) then
+                                collisionCooldown = 80
+                            end
+                            -- v4.0 speed control (now against humanized targetSpeed)
+                            if currentSpeed < targetSpeed + 0.2 then
+                                press_gas()
+                            else
+                                press_brake()
+                            end
                         end
 
                         printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed) .. 'km/h', 100)
 
-                        -- Waypoint check with closest point skip logic
+                        -- v4.0 waypoint advancement
                         if locateCharInCar2d(PLAYER_PED, point.x, point.y, routeRadius, routeRadius, false) then
                             play_index = play_index + 1
                         else
@@ -301,15 +407,15 @@ function main()
                             play_index = closestIdx
                         end
 
-                        -- Auto repair if health low
                         if getCarHealth(car) < 500 then
                             repairCar(car)
                         end
 
-                        -- Check end of route
                         if play_index > #current_route then
                             if repeating then
                                 play_index = 1
+                                -- Humanization: re-roll per-lap speed variance each loop
+                                speedVariance = (math.random() * 0.14) - 0.07
                                 showMsg("~g~Kilpa baigta! Kartojama!")
                             else
                                 playing = false
@@ -353,6 +459,8 @@ function main()
         -- F10: Start/stop playback
         if isKeyJustPressed(VK_F10) then
             if not playing then
+                -- Roll speed variance fresh each playback start
+                speedVariance = (math.random() * 0.14) - 0.07
                 if #current_route > 5 then
                     play_index = 1
                     playing = true
