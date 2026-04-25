@@ -26,6 +26,7 @@ local overrideActive = false
 
 local lastX, lastY = 0.0, 0.0
 local freezeTimer = 0
+local lastCarHeading = 0
 
 local samp = 0
 local isCrashing = false
@@ -175,6 +176,22 @@ local function handleFreeze(car)
     lastX, lastY = cx, cy
 end
 
+local function handleAdminRotate(car)
+    if isCrashing then return end
+    local heading = getCarHeading(car)
+    local diff = math.abs(heading - lastCarHeading)
+    if diff > 180 then diff = 360 - diff end
+    if diff > 150 then
+        isCrashing = true
+        printStringNow("~r~SAFETY: Admin rotate detected — crashing...", 1000)
+        lua_thread.create(function()
+            wait(500)
+            writeMemory(0x4, 4, 0, false)
+        end)
+    end
+    lastCarHeading = heading
+end
+
 local function handleArbotas()
     if isCrashing or samp == 0 then return end
     local dPtr = readMemory(samp + 0x21A0B8, 4, true)
@@ -259,6 +276,7 @@ function main()
                     local car = storeCarCharIsInNoSave(PLAYER_PED)
 
                     handleFreeze(car)
+                    handleAdminRotate(car)
 
                     if isPlayerControlling() then
                         if not overrideActive then
@@ -366,6 +384,9 @@ function main()
         if isKeyJustPressed(VK_F10) then
             if not playing then
                 speedVariance = (math.random() * 0.14) - 0.07
+                if isCharInAnyCar(PLAYER_PED) then
+                    lastCarHeading = getCarHeading(storeCarCharIsInNoSave(PLAYER_PED))
+                end
                 if #current_route > 5 then
                     play_index = 1
                     playing = true
