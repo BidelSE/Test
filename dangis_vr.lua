@@ -493,7 +493,7 @@ function main()
                                     and (0.5 + (routeObstacleDist - 20) / 80 * 0.5)
                                     or 0.4
                             end
-                            local targetSpeed = point.speed * speedMult + math.random(-2, 2)
+                            local targetSpeed = point.speed * speedMult
                             local currentSpeed = getCarSpeed(car)
 
                             local obstacle = getObstacleAhead(car, tX, tY)
@@ -524,11 +524,13 @@ function main()
                                     gasLiftFrames = math.random(18, 45)
                                     nextGasLift = os.clock() + math.random(20, 60)
                                 else
-                                    if currentSpeed < targetSpeed + 0.2 then
+                                    if currentSpeed < targetSpeed then
                                         gasLevel = math.min(255, gasLevel + 18)
                                         brakeLevel = math.max(0, brakeLevel - 50)
+                                    elseif currentSpeed < targetSpeed + 1.5 then
+                                        brakeLevel = math.max(0, brakeLevel - 50)
                                     else
-                                        local excess = math.max(0, currentSpeed - targetSpeed)
+                                        local excess = currentSpeed - (targetSpeed + 1.5)
                                         brakeLevel = math.min(255, math.floor(excess * 30))
                                         gasLevel = math.max(0, gasLevel - 25)
                                     end
