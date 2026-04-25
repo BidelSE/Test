@@ -467,9 +467,9 @@ function main()
                                         nudgeFrames = nudgeFrames - 1
                                         if nudgeFrames == 0 then nudgeOffset = 0.0 end
                                     elseif os.clock() >= nextNudge then
-                                        nudgeOffset = (math.random() * 1.0 - 0.5) * 0.9
-                                        nudgeFrames = math.random(30, 70)
-                                        nextNudge = os.clock() + math.random(12, 40)
+                                        nudgeOffset = (math.random() * 2.4) - 1.2
+                                        nudgeFrames = math.random(80, 160)
+                                        nextNudge = os.clock() + math.random(15, 45)
                                     end
                                     local targetLateral = lapWander + nudgeOffset
                                     if routeObstacleDist < 60 and routeAvoidDir ~= 0 then
@@ -560,7 +560,7 @@ function main()
                             if play_index > #current_route then
                                 if repeating then
                                     play_index = 1
-                                    lapWander = (math.random() * 1.6) - 0.8
+                                    lapWander = (math.random() * 3.0) - 1.5
                                     gasLevel = 0; brakeLevel = 0
                                     gasLiftFrames = 0
                                     nudgeFrames = 0; nudgeOffset = 0.0
@@ -610,7 +610,7 @@ function main()
 
         if isKeyJustPressed(VK_F10) then
             if not playing then
-                lapWander = (math.random() * 1.6) - 0.8
+                lapWander = (math.random() * 3.0) - 1.5
                 lapCount = 0
                 gasLevel = 0; brakeLevel = 0
                 gasLiftFrames = 0
