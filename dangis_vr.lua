@@ -376,10 +376,20 @@ function main()
                     -- Safety: freeze detection + humanization
                     handleFreeze(car)
 
+                    -- Pause driving while chat input or any dialog is open.
+                    -- A real driver would lift off the gas when they open chat.
+                    -- Also prevents W/A/S/D typed into the chat box from being
+                    -- misread as driving input by isPlayerControlling below.
+                    local _, chatOpen   = pcall(sampIsChatInputActive)
+                    local _, dialogOpen = pcall(sampIsDialogActive)
+                    if chatOpen or dialogOpen then
+                        writeMemory(0xB73458 + 0x20, 1, 0,   false) -- release gas
+                        writeMemory(0xB73458 + 0xC,  1, 100, false) -- gentle brake
+                        setGameKeyState(0, 0)                        -- straighten
                     -- Safety: manual override — player input wins, bot yields.
                     -- Bot values are cleared once on the transition frame only.
                     -- Writing zeros every frame cancels the player's W/A/S/D.
-                    if isPlayerControlling() then
+                    elseif isPlayerControlling() then
                         if not overrideActive then
                             overrideActive = true
                             writeMemory(0xB73458 + 0x20, 1, 0, false)
