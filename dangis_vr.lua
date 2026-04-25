@@ -39,6 +39,11 @@ local lapCount = 0
 local nextBreakTime = 0
 local autoPaused = false
 
+local showTrail = false
+local currentTrail = {}
+local lastTrail = {}
+local trailTick = 0
+
 local samp = 0
 local isCrashing = false
 local arbotasHandled = false
@@ -369,6 +374,14 @@ function main()
                         end)
                     end
 
+                    trailTick = trailTick + 1
+                    if trailTick >= 8 then
+                        trailTick = 0
+                        if #currentTrail < 3000 then
+                            table.insert(currentTrail, {x=carX, y=carY, z=carZ})
+                        end
+                    end
+
                     handleFreeze(car, current_route, play_index)
                     handleAdminRotate(car)
 
@@ -472,6 +485,9 @@ function main()
                                     steerBuf = {}
                                     for i = 1, delayFrames do steerBuf[i] = 0 end
                                     lapCount = lapCount + 1
+                                    lastTrail = currentTrail
+                                    currentTrail = {}
+                                    trailTick = 0
                                     showMsg("~g~Kilpa baigta! Kartojama!")
                                 else
                                     playing = false; play_index = 1
@@ -519,6 +535,7 @@ function main()
                 gasLevel = 0; brakeLevel = 0
                 autoPaused = false
                 steerBuf = {0, 0}
+                currentTrail = {}; lastTrail = {}; trailTick = 0
                 nextBreakTime = os.clock() + math.random(45, 90) * 60
                 if isCharInAnyCar(PLAYER_PED) then
                     lastCarHeading = getCarHeading(storeCarCharIsInNoSave(PLAYER_PED))
@@ -580,7 +597,33 @@ function main()
             gasLevel = 0; brakeLevel = 0
             writeMemory(0xB73458 + 0x20, 1, 0, false)
             writeMemory(0xB73458 + 0xC,  1, 0, false)
+            currentTrail = {}; lastTrail = {}; trailTick = 0
             showMsg("~r~Viskas sustabdyta!")
+        end
+
+        if isKeyJustPressed(VK_F8) then
+            showTrail = not showTrail
+            showMsg(showTrail and "~g~Trajektorija IJUNGTA!" or "~r~Trajektorija ISJUNGTA!")
+        end
+
+        if showTrail then
+            local px, py, pz = getCharCoordinates(PLAYER_PED)
+            for _, p in ipairs(lastTrail) do
+                if getDistanceBetweenCoords2d(px, py, p.x, p.y) < 200 then
+                    if isPointOnScreen(p.x, p.y, p.z, 0.0) then
+                        local sx, sy = convert3DCoordsToScreen(p.x, p.y, p.z)
+                        renderDrawPolygon(sx, sy, 5, 5, 6, 0.0, 0xCCFFFF00)
+                    end
+                end
+            end
+            for _, p in ipairs(currentTrail) do
+                if getDistanceBetweenCoords2d(px, py, p.x, p.y) < 200 then
+                    if isPointOnScreen(p.x, p.y, p.z, 0.0) then
+                        local sx, sy = convert3DCoordsToScreen(p.x, p.y, p.z)
+                        renderDrawPolygon(sx, sy, 5, 5, 6, 0.0, 0xCC00FFFF)
+                    end
+                end
+            end
         end
     end
 end
