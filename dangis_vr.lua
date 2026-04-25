@@ -44,6 +44,9 @@ local routeObstacleDist = math.huge
 local routeAvoidDir = 0
 local routeObstacleTimer = 0
 local currentLateral = 0.0
+local nudgeOffset = 0.0
+local nudgeFrames = 0
+local nextNudge = 0
 
 local showTrail = false
 local currentTrail = {}
@@ -460,7 +463,15 @@ function main()
                                 local ndy = current_route[play_index + 1].y - current_route[play_index].y
                                 local nd = math.sqrt(ndx * ndx + ndy * ndy)
                                 if nd > 0.1 then
-                                    local targetLateral = lapWander
+                                    if nudgeFrames > 0 then
+                                        nudgeFrames = nudgeFrames - 1
+                                        if nudgeFrames == 0 then nudgeOffset = 0.0 end
+                                    elseif os.clock() >= nextNudge then
+                                        nudgeOffset = (math.random() * 1.0 - 0.5) * 0.9
+                                        nudgeFrames = math.random(30, 70)
+                                        nextNudge = os.clock() + math.random(12, 40)
+                                    end
+                                    local targetLateral = lapWander + nudgeOffset
                                     if routeObstacleDist < 60 and routeAvoidDir ~= 0 then
                                         local strength = (1.0 - routeObstacleDist / 60.0) * 2.0
                                         targetLateral = targetLateral + routeAvoidDir * strength
@@ -552,6 +563,7 @@ function main()
                                     lapWander = (math.random() * 1.6) - 0.8
                                     gasLevel = 0; brakeLevel = 0
                                     gasLiftFrames = 0
+                                    nudgeFrames = 0; nudgeOffset = 0.0
                                     currentLateral = 0.0
                                     local delayFrames = math.random(1, 2)
                                     steerBuf = {}
@@ -603,6 +615,8 @@ function main()
                 gasLevel = 0; brakeLevel = 0
                 gasLiftFrames = 0
                 nextGasLift = os.clock() + math.random(20, 60)
+                nudgeFrames = 0; nudgeOffset = 0.0
+                nextNudge = os.clock() + math.random(12, 40)
                 autoPaused = false
                 steerBuf = {0, 0}
                 nextBreakTime = os.clock() + math.random(45, 90) * 60
