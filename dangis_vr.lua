@@ -178,72 +178,81 @@ local function isPlayerControlling()
 end
 
 -- Detects the "Ar žmogus" list dialog and auto-selects the blank line after a
--- human-realistic reading delay (2.5–7 s). Crash is fallback if no blank found.
--- Uses individual SAMP getters (sampGetCurrentDialogType/Caption/Text) since
--- the all-in-one sampGetCurrentDialogInfo isn't exposed in moonloader 0.27.x.
+-- human-realistic reading delay (2.5–7 s).
+-- All SAMP dialog calls are wrapped in pcall to survive the race window where
+-- sampIsDialogActive() returns true but the internal struct isn't fully written
+-- yet — dereferencing it caused the null-pointer crash in samp.dll.
+-- Fallback is a clean /q disconnect instead of a memory write to 0x0, which
+-- was the other likely crash source.
 local function handleArbotas()
-    if not sampIsDialogActive() then
+    local ok, active = pcall(sampIsDialogActive)
+    if not ok or not active then
         arbotasHandled = false
-        isCrashing = false
         return
     end
     if arbotasHandled then return end
 
-    local style = sampGetCurrentDialogType()
-    if style ~= 2 then return end -- only LIST dialogs
+    -- Guard every samp dialog getter — the struct may not be ready yet
+    local ok1, style   = pcall(sampGetCurrentDialogType)
+    local ok2, title   = pcall(sampGetCurrentDialogCaption)
+    if not ok1 or not ok2 then return end
+    if style ~= 2 then return end
 
-    local title = sampGetCurrentDialogCaption() or ""
-    local lowerTitle = title:lower()
+    local lowerTitle = (title or ""):lower()
     if not (lowerTitle:find("mogus") or lowerTitle:find("bot") or lowerTitle:find("human")) then return end
 
     arbotasHandled = true
     printStringNow("~y~SAFETY: Arbotas detected, scanning items...", 2000)
 
-    -- Find blank line. Prefer per-item iteration if available; fall back to
-    -- splitting the full dialog text by newlines.
+    -- Find blank line. Prefer per-item iteration; fall back to splitting full text.
     local blankIndex = -1
     if sampGetCurrentDialogListItemCount and sampGetCurrentDialogListItem then
-        local count = sampGetCurrentDialogListItemCount()
-        for i = 0, count - 1 do
-            local item = sampGetCurrentDialogListItem(i) or ""
-            if item:match("^%s*$") then
-                blankIndex = i
-                break
+        local ok3, count = pcall(sampGetCurrentDialogListItemCount)
+        if ok3 and count then
+            for i = 0, count - 1 do
+                local ok4, item = pcall(sampGetCurrentDialogListItem, i)
+                if ok4 and (item or ""):match("^%s*$") then
+                    blankIndex = i
+                    break
+                end
             end
         end
-    else
-        local items = sampGetCurrentDialogText() or ""
-        local idx = 0
-        for line in (items .. "\n"):gmatch("([^\n]*)\n") do
-            if line:match("^%s*$") then
-                blankIndex = idx
-                break
+    end
+    if blankIndex < 0 then
+        local ok5, items = pcall(sampGetCurrentDialogText)
+        if ok5 then
+            local idx = 0
+            for line in ((items or "") .. "\n"):gmatch("([^\n]*)\n") do
+                if line:match("^%s*$") then
+                    blankIndex = idx
+                    break
+                end
+                idx = idx + 1
             end
-            idx = idx + 1
         end
     end
 
     if blankIndex >= 0 then
-        local capturedId = sampGetCurrentDialogId()
+        local ok6, capturedId = pcall(sampGetCurrentDialogId)
+        if not ok6 then return end
         local capturedIdx = blankIndex
         lua_thread.create(function()
             local delay = math.random(2500, 7000)
             printStringNow("~y~SAFETY: Answering arbotas in ~" .. math.floor(delay / 1000) .. "s", 3000)
             wait(delay)
-            if sampIsDialogActive() then
-                sampSendDialogResponse(capturedId, 1, capturedIdx, "")
+            local stillActive = pcall(sampIsDialogActive)
+            if stillActive then
+                pcall(sampSendDialogResponse, capturedId, 1, capturedIdx, "")
                 printStringNow("~g~SAFETY: Arbotas answered (blank line " .. capturedIdx .. ")", 2000)
             end
         end)
     else
-        if not isCrashing then
-            isCrashing = true
-            printStringNow("~r~SAFETY: No blank line found — crashing as fallback...", 2000)
-            lua_thread.create(function()
-                wait(1500)
-                writeMemory(0x0, 4, 0, true) -- null-pointer write → hardware fault crash
-            end)
-        end
+        -- No blank line found: disconnect cleanly via /q rather than crashing
+        printStringNow("~r~SAFETY: No blank line found — disconnecting...", 2000)
+        lua_thread.create(function()
+            wait(1500)
+            sampSendChat("/q")
+        end)
     end
 end
 
