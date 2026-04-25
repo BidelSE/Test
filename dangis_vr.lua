@@ -16,7 +16,8 @@ local tick = 0
 local recordingDelay = 80
 local lastRecordHeading = 0
 
-local speedVariance = 0.0
+local gasLiftFrames = 0
+local nextGasLift = 0
 local lastSteerValue = 0
 local steerNoiseValue = 0
 local steerNoiseDuration = 0
@@ -481,7 +482,7 @@ function main()
                                     and (0.5 + (routeObstacleDist - 20) / 80 * 0.5)
                                     or 0.4
                             end
-                            local targetSpeed = point.speed * (1.0 + speedVariance) * speedMult + math.random(-2, 2)
+                            local targetSpeed = point.speed * speedMult + math.random(-2, 2)
                             local currentSpeed = getCarSpeed(car)
 
                             local obstacle = getObstacleAhead(car, tX, tY)
@@ -504,13 +505,22 @@ function main()
                                 writeMemory(0xB73458 + 0x20, 1, gasLevel, false)
                                 writeMemory(0xB73458 + 0xC, 1, brakeLevel, false)
                             else
-                                if currentSpeed < targetSpeed + 0.2 then
-                                    gasLevel = math.min(255, gasLevel + 18)
-                                    brakeLevel = math.max(0, brakeLevel - 50)
+                                if gasLiftFrames > 0 then
+                                    gasLiftFrames = gasLiftFrames - 1
+                                    gasLevel = 0
+                                    brakeLevel = 0
+                                elseif os.clock() >= nextGasLift then
+                                    gasLiftFrames = math.random(18, 45)
+                                    nextGasLift = os.clock() + math.random(20, 60)
                                 else
-                                    local excess = math.max(0, currentSpeed - targetSpeed)
-                                    brakeLevel = math.min(255, math.floor(excess * 30))
-                                    gasLevel = math.max(0, gasLevel - 25)
+                                    if currentSpeed < targetSpeed + 0.2 then
+                                        gasLevel = math.min(255, gasLevel + 18)
+                                        brakeLevel = math.max(0, brakeLevel - 50)
+                                    else
+                                        local excess = math.max(0, currentSpeed - targetSpeed)
+                                        brakeLevel = math.min(255, math.floor(excess * 30))
+                                        gasLevel = math.max(0, gasLevel - 25)
+                                    end
                                 end
                                 writeMemory(0xB73458 + 0x20, 1, gasLevel, false)
                                 writeMemory(0xB73458 + 0xC, 1, brakeLevel, false)
@@ -539,9 +549,9 @@ function main()
                             if play_index > #current_route then
                                 if repeating then
                                     play_index = 1
-                                    speedVariance = (math.random() * 0.30) - 0.15
                                     lapWander = (math.random() * 1.6) - 0.8
                                     gasLevel = 0; brakeLevel = 0
+                                    gasLiftFrames = 0
                                     currentLateral = 0.0
                                     local delayFrames = math.random(1, 2)
                                     steerBuf = {}
@@ -588,10 +598,11 @@ function main()
 
         if isKeyJustPressed(VK_F10) then
             if not playing then
-                speedVariance = (math.random() * 0.30) - 0.15
-                lapWander = (math.random() * 3.0) - 1.5
+                lapWander = (math.random() * 1.6) - 0.8
                 lapCount = 0
                 gasLevel = 0; brakeLevel = 0
+                gasLiftFrames = 0
+                nextGasLift = os.clock() + math.random(20, 60)
                 autoPaused = false
                 steerBuf = {0, 0}
                 nextBreakTime = os.clock() + math.random(45, 90) * 60
