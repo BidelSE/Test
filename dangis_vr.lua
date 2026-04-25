@@ -608,22 +608,36 @@ function main()
 
         if showTrail then
             local px, py, pz = getCharCoordinates(PLAYER_PED)
-            for _, p in ipairs(lastTrail) do
-                if getDistanceBetweenCoords2d(px, py, p.x, p.y) < 200 then
-                    if isPointOnScreen(p.x, p.y, p.z, 0.0) then
-                        local sx, sy = convert3DCoordsToScreen(p.x, p.y, p.z)
-                        renderDrawPolygon(sx, sy, 5, 5, 6, 0.0, 0xCCFFFF00)
+            local spacing = 8
+            local phase = math.floor((os.clock() % 0.2) / 0.2 * spacing)
+            local function drawTrailArrows(trail, color)
+                if #trail < 2 then return end
+                local i = 1 + phase
+                while i <= #trail - 1 do
+                    local p  = trail[i]
+                    local p2 = trail[i + 1]
+                    if getDistanceBetweenCoords2d(px, py, p.x, p.y) < 200 then
+                        if isPointOnScreen(p.x, p.y, p.z, 0.0) then
+                            local sx,  sy  = convert3DCoordsToScreen(p.x,  p.y,  p.z)
+                            local sx2, sy2 = convert3DCoordsToScreen(p2.x, p2.y, p2.z)
+                            local dx, dy = sx2 - sx, sy2 - sy
+                            local len = math.sqrt(dx*dx + dy*dy)
+                            if len > 0.5 then
+                                local nx, ny = dx/len, dy/len
+                                local wx1 = sx - nx*9 + (-ny)*5
+                                local wy1 = sy - ny*9 + nx*5
+                                local wx2 = sx - nx*9 - (-ny)*5
+                                local wy2 = sy - ny*9 - nx*5
+                                renderDrawLine(sx, sy, wx1, wy1, 1.5, color)
+                                renderDrawLine(sx, sy, wx2, wy2, 1.5, color)
+                            end
+                        end
                     end
+                    i = i + spacing
                 end
             end
-            for _, p in ipairs(currentTrail) do
-                if getDistanceBetweenCoords2d(px, py, p.x, p.y) < 200 then
-                    if isPointOnScreen(p.x, p.y, p.z, 0.0) then
-                        local sx, sy = convert3DCoordsToScreen(p.x, p.y, p.z)
-                        renderDrawPolygon(sx, sy, 5, 5, 6, 0.0, 0xCC00FFFF)
-                    end
-                end
-            end
+            drawTrailArrows(lastTrail,    0xCCFFFF00)
+            drawTrailArrows(currentTrail, 0xCC00FFFF)
         end
     end
 end
