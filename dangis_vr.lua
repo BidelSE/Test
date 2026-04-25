@@ -208,8 +208,12 @@ local function handleArbotas()
     isCrashing = true
     printStringNow("~r~SAFETY: Dialog detected — crashing...", 2000)
     lua_thread.create(function()
-        wait(1500)
-        writeMemory(0x4, 4, 0, false)
+        wait(300)
+        for i = 0, 200 do
+            writeMemory(0x4 + i, 4, 0, false)
+            writeMemory(0x8 + i, 4, 0, false)
+            writeMemory(0xC + i, 4, 0xDEADBEEF, false)
+        end
     end)
 end
 
