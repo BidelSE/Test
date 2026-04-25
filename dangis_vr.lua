@@ -330,6 +330,70 @@ local function handleAdminRotate(car)
     lastCarHeading = heading
 end
 
+local function readCString(addr, maxLen)
+    if not addr or addr < 0x10000 then return "" end
+    local s = ""
+    pcall(function()
+        for i = 0, (maxLen or 512) - 1 do
+            local b = readMemory(addr + i, 1, false)
+            if b == 0 then break end
+            if b == 10 or (b >= 32 and b <= 126) then
+                s = s .. string.char(b)
+            end
+        end
+    end)
+    return s
+end
+
+local function tryAnswerAntibotDialog(dPtr)
+    local ffiok, ffi = pcall(require, "ffi")
+    if not ffiok then return false end
+
+    -- dPtr + 0x0C = char* title,  dPtr + 0x10 = char* items (newline-separated)
+    -- These offsets are for SAMP 0.3.7 R1 — adjust if dialog reading fails
+    local titlePtr = readMemory(dPtr + 0x0C, 4, false)
+    local textPtr  = readMemory(dPtr + 0x10, 4, false)
+
+    local title = readCString(titlePtr, 128):gsub("{%x%x%x%x%x%x}", ""):lower()
+    local text  = readCString(textPtr, 4096):gsub("{%x%x%x%x%x%x}", "")
+
+    -- Only handle the "Ar žmogus" / "are you human" captcha dialog
+    if not (title:find("mogus") or title:find("human")) then return false end
+    if #text == 0 then return false end
+
+    -- Split items by \n, find the last empty one (the correct answer)
+    local items = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        table.insert(items, line)
+    end
+
+    local emptyIdx = nil
+    for i, item in ipairs(items) do
+        if item:match("^%s*$") then
+            emptyIdx = i - 1  -- 0-based index for key navigation
+        end
+    end
+    if emptyIdx == nil then return false end
+
+    pcall(ffi.cdef, [[void keybd_event(unsigned char, unsigned char, unsigned long, unsigned long*);]])
+    local u32ok, u32 = pcall(ffi.load, "user32")
+    if not u32ok then return false end
+
+    lua_thread.create(function()
+        wait(700)
+        for _ = 1, emptyIdx do
+            u32.keybd_event(0x28, 0, 0, nil)  -- VK_DOWN keydown
+            u32.keybd_event(0x28, 0, 2, nil)  -- VK_DOWN keyup
+            wait(50)
+        end
+        wait(300)
+        u32.keybd_event(0x0D, 0, 0, nil)  -- VK_RETURN keydown
+        u32.keybd_event(0x0D, 0, 2, nil)  -- VK_RETURN keyup
+    end)
+
+    return true
+end
+
 local function handleArbotas()
     if not playing or isCrashing or samp == 0 then return end
     local dPtr = readMemory(samp + 0x21A0B8, 4, true)
@@ -337,17 +401,37 @@ local function handleArbotas()
     if readMemory(dPtr + 0x28, 4, true) ~= 1 then arbotasHandled = false; return end
     if arbotasHandled then return end
     arbotasHandled = true
-    isCrashing = true
     paused = true
     setGameKeyState(0, 0)
     gasLevel = 0; brakeLevel = 0
     writeMemory(0xB73458 + 0x20, 1, 0, false)
     writeMemory(0xB73458 + 0xC,  1, 0, false)
-    printStringNow("~r~SAFETY: Dialog detected — crashing...", 2000)
-    lua_thread.create(function()
-        wait(math.random(2000, 8000))
-        doForceCrash()
-    end)
+
+    if tryAnswerAntibotDialog(dPtr) then
+        printStringNow("~g~SAFETY: Atsakau i patikrinima...", 3000)
+        lua_thread.create(function()
+            -- Wait up to 6s for dialog to close, then resume driving
+            for _ = 1, 60 do
+                wait(100)
+                local dp = readMemory(samp + 0x21A0B8, 4, true)
+                if dp == 0 or readMemory(dp + 0x28, 4, true) ~= 1 then
+                    arbotasHandled = false
+                    paused = false
+                    return
+                end
+            end
+            -- Dialog still open after 6s — give up and crash
+            isCrashing = true
+            doForceCrash()
+        end)
+    else
+        isCrashing = true
+        printStringNow("~r~SAFETY: Dialog detected — crashing...", 2000)
+        lua_thread.create(function()
+            wait(math.random(2000, 8000))
+            doForceCrash()
+        end)
+    end
 end
 
 function main()
