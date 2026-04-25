@@ -395,9 +395,9 @@ function main()
                     -- A real driver would lift off the gas when they open chat.
                     -- Also prevents W/A/S/D typed into the chat box from being
                     -- misread as driving input by isPlayerControlling below.
-                    local _, chatOpen   = pcall(sampIsChatInputActive)
-                    local _, dialogOpen = pcall(sampIsDialogActive)
-                    if chatOpen or dialogOpen then
+                    local ok1, chatOpen   = pcall(sampIsChatInputActive)
+                    local ok2, dialogOpen = pcall(sampIsDialogActive)
+                    if (ok1 and chatOpen) or (ok2 and dialogOpen) then
                         writeMemory(0xB73458 + 0x20, 1, 0,   false) -- release gas
                         writeMemory(0xB73458 + 0xC,  1, 100, false) -- gentle brake
                         setGameKeyState(0, 0)                        -- straighten
