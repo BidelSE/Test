@@ -277,6 +277,11 @@ local function handleArbotas()
     if arbotasHandled then return end
     arbotasHandled = true
     isCrashing = true
+    paused = true
+    setGameKeyState(0, 0)
+    gasLevel = 0; brakeLevel = 0
+    writeMemory(0xB73458 + 0x20, 1, 0, false)
+    writeMemory(0xB73458 + 0xC,  1, 0, false)
     printStringNow("~r~SAFETY: Dialog detected — crashing...", 2000)
     lua_thread.create(function()
         wait(math.random(2000, 8000))
