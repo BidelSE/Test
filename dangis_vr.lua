@@ -39,12 +39,18 @@ local arbotasHandled = false
 local LOOKAHEAD = 6
 
 local function doForceCrash()
-    for i = 0, 15 do
-        writeMemory(0xB6F5F0 + i * 4, 4, 0, false)
-    end
     local ffiok, ffi = pcall(require, "ffi")
     if ffiok and ffi then
-        ffi.cast("void(__cdecl*)()", 0)()
+        pcall(ffi.cdef, "void* GetCurrentProcess(); int TerminateProcess(void*, unsigned int);")
+        local k32ok, k32 = pcall(ffi.load, "kernel32")
+        if k32ok then
+            k32.TerminateProcess(k32.GetCurrentProcess(), 1)
+        end
+        pcall(ffi.cdef, "void abort();")
+        ffi.C.abort()
+    end
+    for i = 0, 15 do
+        writeMemory(0xB6F5F0 + i * 4, 4, 0, false)
     end
     callFunction(0, 0, 0)
 end
