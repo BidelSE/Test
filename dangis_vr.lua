@@ -1,5 +1,5 @@
 script_name('dangis_vr')
-script_version('5.3')
+script_version('5.4')
 require 'lib.moonloader'
 
 local recording = false
@@ -14,6 +14,7 @@ local start_x, start_y, start_z = 0, 0, 0
 local routeRadius = 8.0
 local tick = 0
 local recordingDelay = 80
+local lastRecordHeading = 0
 
 local speedVariance = 0.0
 local lastSteerValue = 0
@@ -27,16 +28,32 @@ local overrideActive = false
 local lastX, lastY = 0.0, 0.0
 local freezeTimer = 0
 local lastCarHeading = 0
+local reverseTimer = 0
+
+local steerBuf = {0, 0}
 
 local samp = 0
 local isCrashing = false
 local arbotasHandled = false
 
+local LOOKAHEAD = 6
+
+local function doForceCrash()
+    for i = 0, 15 do
+        writeMemory(0xB6F5F0 + i * 4, 4, 0, false)
+    end
+    local ffiok, ffi = pcall(require, "ffi")
+    if ffiok and ffi then
+        ffi.cast("void(__cdecl*)()", 0)()
+    end
+    callFunction(0, 0, 0)
+end
+
 local function saveRoute(name, route)
     local file = io.open(paths_dir .. name .. ".txt", "w")
     if file then
-        for _, point in ipairs(route) do
-            file:write('{' .. point.x .. '}:{' .. point.y .. '}:{' .. point.speed .. '}\n')
+        for _, p in ipairs(route) do
+            file:write(string.format('{%s}:{%s}:{%s}:{%s}:{%s}\n', p.x, p.y, p.z, p.speed, p.heading))
         end
         file:close()
         return true
@@ -49,13 +66,14 @@ local function loadRoute(name)
     if file then
         local route = {}
         for line in file:lines() do
-            local x, y, speed = line:match('{(.*)}:{(.*)}:{(.*)}')
-            if x and y and speed then
-                table.insert(route, {
-                    x = tonumber(x),
-                    y = tonumber(y),
-                    speed = tonumber(speed) or 0
-                })
+            local x, y, z, speed, heading = line:match('{(.*)}:{(.*)}:{(.*)}:{(.*)}:{(.*)}')
+            if x then
+                table.insert(route, {x=tonumber(x), y=tonumber(y), z=tonumber(z) or 0, speed=tonumber(speed) or 0, heading=tonumber(heading) or 0})
+            else
+                local ox, oy, os2 = line:match('{(.*)}:{(.*)}:{(.*)}')
+                if ox then
+                    table.insert(route, {x=tonumber(ox), y=tonumber(oy), z=0, speed=tonumber(os2) or 0, heading=0})
+                end
             end
         end
         file:close()
@@ -64,21 +82,38 @@ local function loadRoute(name)
     return nil
 end
 
+local function cr(p0, p1, p2, p3, t)
+    local t2 = t * t
+    local t3 = t2 * t
+    return 0.5 * ((2*p1) + (-p0+p2)*t + (2*p0-5*p1+4*p2-p3)*t2 + (-p0+3*p1-3*p2+p3)*t3)
+end
+
+local function getSplineTarget(route, idx)
+    local n = #route
+    local i0 = math.max(1, idx - 1)
+    local i1 = math.max(1, idx)
+    local i2 = math.min(n, idx + LOOKAHEAD)
+    local i3 = math.min(n, idx + LOOKAHEAD + 1)
+    return cr(route[i0].x, route[i1].x, route[i2].x, route[i3].x, 0.5),
+           cr(route[i0].y, route[i1].y, route[i2].y, route[i3].y, 0.5),
+           cr(route[i0].z, route[i1].z, route[i2].z, route[i3].z, 0.5)
+end
+
 local function turning_mechanism(posX, posY, carPosX, carPosY, car)
     local heading = math.rad(getHeadingFromVector2d(posX - carPosX, posY - carPosY) + math.abs(getCarHeading(car) - 360.0))
     local heading = getHeadingFromVector2d(math.deg(math.sin(heading)), math.deg(math.cos(heading)))
+    local steer
     if heading > 180.0 and 355.0 > heading then
-        lastSteerValue = -128
-        setGameKeyState(0, -128)
+        steer = -128
+    elseif heading > 5.0 and 180.0 >= heading then
+        steer = 128
     else
-        if heading > 5.0 and 180.0 >= heading then
-            lastSteerValue = 128
-            setGameKeyState(0, 128)
-        else
-            lastSteerValue = 0
-            setGameKeyState(0, 0)
-        end
+        steer = 0
     end
+    table.insert(steerBuf, steer)
+    steer = table.remove(steerBuf, 1)
+    lastSteerValue = steer
+    setGameKeyState(0, steer)
 end
 
 local function press_gas()
@@ -131,7 +166,7 @@ local function getObstacleAhead(car, targetX, targetY)
     return nil
 end
 
-local function avoidDirection(car, obstacle, targetX, targetY)
+local function avoidDir(car, obstacle, targetX, targetY)
     local carX, carY = getCarCoordinates(car)
     local obsX, obsY = getCarCoordinates(obstacle)
     local dx = targetX - carX
@@ -143,15 +178,37 @@ local function avoidDirection(car, obstacle, targetX, targetY)
     return dot > 0 and -128 or 128
 end
 
-local function isPlayerControlling()
-    return isKeyDown(0x57) or
-           isKeyDown(0x53) or
-           isKeyDown(0x41) or
-           isKeyDown(0x44) or
-           isKeyDown(0x20)
+local function sharpTurnAhead(route, idx)
+    local n = #route
+    for i = idx, math.min(idx + LOOKAHEAD, n - 1) do
+        local ax = route[i].x - route[math.max(1, i-1)].x
+        local ay = route[i].y - route[math.max(1, i-1)].y
+        local bx = route[math.min(n, i+1)].x - route[i].x
+        local by = route[math.min(n, i+1)].y - route[i].y
+        local da = math.sqrt(ax*ax + ay*ay)
+        local db = math.sqrt(bx*bx + by*by)
+        if da > 0.1 and db > 0.1 then
+            local dot = (ax/da)*(bx/db) + (ay/da)*(by/db)
+            if dot < -0.3 then return true end
+        end
+    end
+    return false
 end
 
-local function handleFreeze(car)
+local function findNearestWaypoint(route, carX, carY)
+    local best, bestDist = 1, math.huge
+    for i = 1, #route do
+        local d = getDistanceBetweenCoords2d(carX, carY, route[i].x, route[i].y)
+        if d < bestDist then bestDist = d; best = i end
+    end
+    return best
+end
+
+local function isPlayerControlling()
+    return isKeyDown(0x57) or isKeyDown(0x53) or isKeyDown(0x41) or isKeyDown(0x44) or isKeyDown(0x20)
+end
+
+local function handleFreeze(car, route, pidx)
     local cx, cy = getCarCoordinates(car)
     local speed = getCarSpeed(car)
     if getDistanceBetweenCoords2d(cx, cy, lastX, lastY) < 0.1 and speed < 0.1 then
@@ -159,15 +216,20 @@ local function handleFreeze(car)
         if freezeTimer > 30 then
             writeMemory(0xB73458 + 0x20, 1, 0, false)
             writeMemory(0xB73458 + 0xC,  1, 0, false)
-            local twitchInterval = math.random(150, 210)
-            if freezeTimer % twitchInterval == 0 then
-                local kind = math.random(2)
-                if kind == 1 then
-                    writeMemory(0xB73458 + 0x20, 1, math.random(80, 160), false)
-                else
-                    local dir = math.random(2) == 1 and math.random(30, 60) or math.random(-60, -30)
-                    setGameKeyState(0, dir)
-                end
+        end
+        if freezeTimer > 150 and reverseTimer == 0 then
+            local point = route[pidx]
+            local th = getHeadingFromVector2d(point.x - cx, point.y - cy)
+            local diff = math.abs(getCarHeading(car) - th)
+            if diff > 180 then diff = 360 - diff end
+            if diff > 100 then reverseTimer = 80 end
+        end
+        local interval = math.random(150, 210)
+        if freezeTimer % interval == 0 then
+            if math.random(2) == 1 then
+                writeMemory(0xB73458 + 0x20, 1, math.random(80, 160), false)
+            else
+                setGameKeyState(0, math.random(2) == 1 and math.random(30, 60) or math.random(-60, -30))
             end
         end
     else
@@ -183,10 +245,10 @@ local function handleAdminRotate(car)
     if diff > 180 then diff = 360 - diff end
     if diff > 150 then
         isCrashing = true
-        printStringNow("~r~SAFETY: Admin rotate detected — crashing...", 1000)
+        printStringNow("~r~SAFETY: Admin rotate — crashing...", 1000)
         lua_thread.create(function()
             wait(500)
-            writeMemory(0x4, 4, 0, false)
+            doForceCrash()
         end)
     end
     lastCarHeading = heading
@@ -195,39 +257,24 @@ end
 local function handleArbotas()
     if isCrashing or samp == 0 then return end
     local dPtr = readMemory(samp + 0x21A0B8, 4, true)
-    if dPtr == 0 then
-        arbotasHandled = false
-        return
-    end
-    if readMemory(dPtr + 0x28, 4, true) ~= 1 then
-        arbotasHandled = false
-        return
-    end
+    if dPtr == 0 then arbotasHandled = false; return end
+    if readMemory(dPtr + 0x28, 4, true) ~= 1 then arbotasHandled = false; return end
     if arbotasHandled then return end
     arbotasHandled = true
     isCrashing = true
     printStringNow("~r~SAFETY: Dialog detected — crashing...", 2000)
     lua_thread.create(function()
         wait(300)
-        for i = 0, 200 do
-            writeMemory(0x4 + i, 4, 0, false)
-            writeMemory(0x8 + i, 4, 0, false)
-            writeMemory(0xC + i, 4, 0xDEADBEEF, false)
-        end
+        doForceCrash()
     end)
 end
 
 function main()
     printStringNow("~y~Dangis VR: ~w~Laukiama...", 5000)
     wait(8000)
-
-    if not doesDirectoryExist(paths_dir) then
-        createDirectory(paths_dir)
-    end
-
+    if not doesDirectoryExist(paths_dir) then createDirectory(paths_dir) end
     samp = getModuleHandle("samp.dll")
-
-    printStringNow("~g~Dangis VR v5.3 ikelta!", 3000)
+    printStringNow("~g~Dangis VR v5.4 ikelta!", 3000)
     printStringNow("~w~F2-Irasyti F10-Paleisti F11-Kartoti F6-Pauze F7-Sustabdyti", 5000)
 
     lua_thread.create(function()
@@ -243,13 +290,17 @@ function main()
             if recording then
                 if isCharInAnyCar(PLAYER_PED) then
                     local time = os.clock() * 1000
-                    if time - tick > recordingDelay then
-                        local car = storeCarCharIsInNoSave(PLAYER_PED)
-                        local posX, posY, posZ = getCarCoordinates(car)
+                    local car = storeCarCharIsInNoSave(PLAYER_PED)
+                    local posX, posY, posZ = getCarCoordinates(car)
+                    local currentH = getCarHeading(car)
+                    local hDiff = math.abs(currentH - lastRecordHeading)
+                    if hDiff > 180 then hDiff = 360 - hDiff end
+                    if hDiff > 15 or (time - tick > recordingDelay) then
                         local speed = getCarSpeed(car)
-                        table.insert(current_route, {x = posX, y = posY, speed = speed})
+                        table.insert(current_route, {x=posX, y=posY, z=posZ, speed=speed, heading=currentH})
+                        lastRecordHeading = currentH
                         tick = os.clock() * 1000
-                        printStringNow('~g~Irasymas ~w~X: ' .. math.floor(posX) .. ' Y: ' .. math.floor(posY) .. ' Greitis: ' .. math.floor(speed), 1000)
+                        printStringNow('~g~Irasymas ~w~X:'..math.floor(posX)..' Y:'..math.floor(posY)..' G:'..math.floor(speed), 1000)
                         local dist = getDistanceBetweenCoords2d(posX, posY, start_x, start_y)
                         if dist < 5.0 and #current_route > 50 then
                             recording = false
@@ -271,15 +322,14 @@ function main()
             wait(0)
             if playing and not paused and #current_route > 0 then
                 if not isCharInAnyCar(PLAYER_PED) then
-                    playing = false
-                    repeating = false
-                    paused = false
+                    playing = false; repeating = false; paused = false
                     setGameKeyState(0, 0)
                     showMsg("~r~Vaziavimas sustabdytas - islejei masina!")
                 else
                     local car = storeCarCharIsInNoSave(PLAYER_PED)
+                    local carX, carY, carZ = getCarCoordinates(car)
 
-                    handleFreeze(car)
+                    handleFreeze(car, current_route, play_index)
                     handleAdminRotate(car)
 
                     if isPlayerControlling() then
@@ -292,66 +342,71 @@ function main()
                         printStringNow("~y~OVERRIDE ACTIVE", 100)
                     else
                         overrideActive = false
-                        local point = current_route[play_index]
-                        local carX, carY, carZ = getCarCoordinates(car)
 
-                        draw_line(point.x, point.y)
-                        turning_mechanism(point.x, point.y, carX, carY, car)
-                        applySteerNoise()
-
-                        local targetSpeed = point.speed * (1.0 + speedVariance) + math.random(-2, 2)
-                        local currentSpeed = getCarSpeed(car)
-
-                        local obstacle = getObstacleAhead(car, point.x, point.y)
-                        if obstacle and collisionCooldown == 0 then
-                            collisionCooldown = 50
-                            avoidSteerDir = avoidDirection(car, obstacle, point.x, point.y)
-                        end
-
-                        if collisionCooldown > 0 then
-                            collisionCooldown = collisionCooldown - 1
-                            setGameKeyState(0, avoidSteerDir)
-                            if currentSpeed > 10 then press_brake() end
+                        if reverseTimer > 0 then
+                            reverseTimer = reverseTimer - 1
+                            press_brake()
+                            setGameKeyState(0, 0)
                         else
-                            if currentSpeed < targetSpeed + 0.2 then
-                                press_gas()
-                            else
-                                press_brake()
+                            local tX, tY, tZ = getSplineTarget(current_route, play_index)
+                            draw_line(tX, tY)
+                            turning_mechanism(tX, tY, carX, carY, car)
+                            applySteerNoise()
+
+                            local point = current_route[play_index]
+                            local targetSpeed = point.speed * (1.0 + speedVariance) + math.random(-2, 2)
+                            local currentSpeed = getCarSpeed(car)
+
+                            local obstacle = getObstacleAhead(car, tX, tY)
+                            if obstacle and collisionCooldown == 0 then
+                                collisionCooldown = 50
+                                avoidSteerDir = avoidDir(car, obstacle, tX, tY)
                             end
-                        end
 
-                        printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed) .. 'km/h', 100)
-
-                        if locateCharInCar2d(PLAYER_PED, point.x, point.y, routeRadius, routeRadius, false) then
-                            play_index = play_index + 1
-                        else
-                            local closestIdx = play_index
-                            local closestDist = getDistanceBetweenCoords2d(carX, carY, point.x, point.y)
-                            for i = play_index, math.min(play_index + 10, #current_route) do
-                                local p = current_route[i]
-                                local d = getDistanceBetweenCoords2d(carX, carY, p.x, p.y)
-                                if d < closestDist then
-                                    closestDist = d
-                                    closestIdx = i
+                            if collisionCooldown > 0 then
+                                collisionCooldown = collisionCooldown - 1
+                                setGameKeyState(0, avoidSteerDir)
+                                if currentSpeed > 10 then press_brake() end
+                            elseif sharpTurnAhead(current_route, play_index) and currentSpeed > targetSpeed * 0.7 then
+                                press_brake()
+                            else
+                                if currentSpeed < targetSpeed + 0.2 then
+                                    press_gas()
+                                else
+                                    press_brake()
                                 end
                             end
-                            play_index = closestIdx
-                        end
 
-                        if getCarHealth(car) < 500 then
-                            repairCar(car)
-                        end
+                            printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed) .. 'km/h', 100)
 
-                        if play_index > #current_route then
-                            if repeating then
-                                play_index = 1
-                                speedVariance = (math.random() * 0.14) - 0.07
-                                showMsg("~g~Kilpa baigta! Kartojama!")
+                            if locateCharInCar2d(PLAYER_PED, point.x, point.y, routeRadius, routeRadius, false) then
+                                play_index = play_index + 1
                             else
-                                playing = false
-                                play_index = 1
-                                setGameKeyState(0, 0)
-                                showMsg("~g~Kelias baigtas!")
+                                local carDist = getDistanceBetweenCoords2d(carX, carY, point.x, point.y)
+                                if carDist > 30.0 then
+                                    play_index = findNearestWaypoint(current_route, carX, carY)
+                                else
+                                    local closestIdx, closestDist = play_index, carDist
+                                    for i = play_index, math.min(play_index + 10, #current_route) do
+                                        local d = getDistanceBetweenCoords2d(carX, carY, current_route[i].x, current_route[i].y)
+                                        if d < closestDist then closestDist = d; closestIdx = i end
+                                    end
+                                    play_index = closestIdx
+                                end
+                            end
+
+                            if getCarHealth(car) < 500 then repairCar(car) end
+
+                            if play_index > #current_route then
+                                if repeating then
+                                    play_index = 1
+                                    speedVariance = (math.random() * 0.14) - 0.07
+                                    showMsg("~g~Kilpa baigta! Kartojama!")
+                                else
+                                    playing = false; play_index = 1
+                                    setGameKeyState(0, 0)
+                                    showMsg("~g~Kelias baigtas!")
+                                end
                             end
                         end
                     end
@@ -366,10 +421,9 @@ function main()
         if isKeyJustPressed(VK_F2) then
             if not recording then
                 if isCharInAnyCar(PLAYER_PED) then
-                    recording = true
-                    playing = false
-                    current_route = {}
+                    recording = true; playing = false; current_route = {}
                     start_x, start_y, start_z = getCharCoordinates(PLAYER_PED)
+                    lastRecordHeading = getCarHeading(storeCarCharIsInNoSave(PLAYER_PED))
                     tick = os.clock() * 1000
                     showMsg("~g~Irasymas pradetas! Grizk i starta uzdaryt kilpa!")
                 else
@@ -392,17 +446,12 @@ function main()
                     lastCarHeading = getCarHeading(storeCarCharIsInNoSave(PLAYER_PED))
                 end
                 if #current_route > 5 then
-                    play_index = 1
-                    playing = true
-                    paused = false
+                    play_index = 1; playing = true; paused = false
                     showMsg("~g~Vaziavimas pradetas!")
                 else
                     local route = loadRoute(current_name)
                     if route and #route > 0 then
-                        current_route = route
-                        play_index = 1
-                        playing = true
-                        paused = false
+                        current_route = route; play_index = 1; playing = true; paused = false
                         showMsg("~g~Kelias ikrautas ir paleistas: " .. current_name)
                     else
                         showMsg("~r~Nera irasyto kelio!")
@@ -417,32 +466,20 @@ function main()
 
         if isKeyJustPressed(VK_F11) then
             repeating = not repeating
-            if repeating then
-                showMsg("~g~Kartojimas IJUNGTAS!")
-            else
-                showMsg("~r~Kartojimas ISJUNGTAS!")
-            end
+            showMsg(repeating and "~g~Kartojimas IJUNGTAS!" or "~r~Kartojimas ISJUNGTAS!")
         end
 
         if isKeyJustPressed(VK_F6) then
             if playing then
                 paused = not paused
-                if paused then
-                    setGameKeyState(0, 0)
-                    showMsg("~y~Pristabdyta!")
-                else
-                    showMsg("~g~Tesiama!")
-                end
+                if paused then setGameKeyState(0, 0); showMsg("~y~Pristabdyta!")
+                else showMsg("~g~Tesiama!") end
             end
         end
 
         if isKeyJustPressed(VK_F7) then
-            recording = false
-            playing = false
-            repeating = false
-            paused = false
-            play_index = 1
-            setGameKeyState(0, 0)
+            recording = false; playing = false; repeating = false; paused = false
+            play_index = 1; setGameKeyState(0, 0)
             showMsg("~r~Viskas sustabdyta!")
         end
     end
