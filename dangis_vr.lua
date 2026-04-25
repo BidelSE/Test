@@ -39,6 +39,9 @@ local lapCount = 0
 local nextBreakTime = 0
 local autoPaused = false
 
+local routeObstacleDist = math.huge
+local routeObstacleTimer = 0
+
 local showTrail = false
 local currentTrail = {}
 local lastTrail = {}
@@ -222,6 +225,25 @@ local function findNearestWaypoint(route, carX, carY)
     return best
 end
 
+local function scanRouteAhead(route, idx, car)
+    local n = #route
+    local best = math.huge
+    for i = idx + 10, math.min(idx + 200, n), 5 do
+        local p = route[i]
+        local ok1, nearCar = pcall(getClosestCar, p.x, p.y, p.z, 6.0, {}, 0)
+        if ok1 and nearCar and nearCar ~= 0 and nearCar ~= car then
+            local d = i - idx
+            if d < best then best = d end
+        end
+        local ok2, nearObj = pcall(getClosestObject, p.x, p.y, p.z, 3.0, false, false)
+        if ok2 and nearObj and nearObj ~= 0 then
+            local d = i - idx
+            if d < best then best = d end
+        end
+    end
+    return best
+end
+
 local function isPlayerControlling()
     return isKeyDown(0x57) or isKeyDown(0x53) or isKeyDown(0x41) or isKeyDown(0x44) or isKeyDown(0x20)
 end
@@ -382,6 +404,12 @@ function main()
                         end
                     end
 
+                    routeObstacleTimer = routeObstacleTimer + 1
+                    if routeObstacleTimer >= 30 then
+                        routeObstacleTimer = 0
+                        routeObstacleDist = scanRouteAhead(current_route, play_index, car)
+                    end
+
                     handleFreeze(car, current_route, play_index)
                     handleAdminRotate(car)
 
@@ -420,7 +448,13 @@ function main()
                             applySteerNoise()
 
                             local point = current_route[play_index]
-                            local targetSpeed = point.speed * (1.0 + speedVariance) + math.random(-2, 2)
+                            local speedMult = 1.0
+                            if routeObstacleDist < 100 then
+                                speedMult = routeObstacleDist >= 20
+                                    and (0.5 + (routeObstacleDist - 20) / 80 * 0.5)
+                                    or 0.4
+                            end
+                            local targetSpeed = point.speed * (1.0 + speedVariance) * speedMult + math.random(-2, 2)
                             local currentSpeed = getCarSpeed(car)
 
                             local obstacle = getObstacleAhead(car, tX, tY)
