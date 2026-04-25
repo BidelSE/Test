@@ -42,6 +42,7 @@ local autoPaused = false
 local routeObstacleDist = math.huge
 local routeAvoidDir = 0
 local routeObstacleTimer = 0
+local currentLateral = 0.0
 
 local showTrail = false
 local currentTrail = {}
@@ -246,14 +247,18 @@ local function scanRouteAhead(route, idx, car)
             end
         end
         if obX then
-            local d = i - idx
-            if d < best then
-                best = d
-                local prev = route[math.max(1, i - 1)]
-                local rx = p.x - prev.x
-                local ry = p.y - prev.y
-                local cross = rx * (obY - p.y) - ry * (obX - p.x)
-                bestDir = cross > 0 and 1 or -1
+            local prev = route[math.max(1, i - 1)]
+            local rx = p.x - prev.x
+            local ry = p.y - prev.y
+            local rLen = math.sqrt(rx*rx + ry*ry)
+            local cross = rx * (obY - p.y) - ry * (obX - p.x)
+            local lateralDist = rLen > 0.1 and math.abs(cross) / rLen or 99
+            if lateralDist < 2.5 then
+                local d = i - idx
+                if d < best then
+                    best = d
+                    bestDir = cross > 0 and 1 or -1
+                end
             end
         end
     end
@@ -454,13 +459,14 @@ function main()
                                 local ndy = current_route[play_index + 1].y - current_route[play_index].y
                                 local nd = math.sqrt(ndx * ndx + ndy * ndy)
                                 if nd > 0.1 then
-                                    local lateral = lapWander
+                                    local targetLateral = lapWander
                                     if routeObstacleDist < 60 and routeAvoidDir ~= 0 then
-                                        local strength = (1.0 - routeObstacleDist / 60.0) * 4.0
-                                        lateral = lateral + routeAvoidDir * strength
+                                        local strength = (1.0 - routeObstacleDist / 60.0) * 2.0
+                                        targetLateral = targetLateral + routeAvoidDir * strength
                                     end
-                                    tX = tX + (-ndy / nd) * lateral
-                                    tY = tY + (ndx / nd) * lateral
+                                    currentLateral = currentLateral + (targetLateral - currentLateral) * 0.04
+                                    tX = tX + (-ndy / nd) * currentLateral
+                                    tY = tY + (ndx / nd) * currentLateral
                                 end
                             end
 
@@ -534,9 +540,10 @@ function main()
                                 if repeating then
                                     play_index = 1
                                     speedVariance = (math.random() * 0.30) - 0.15
-                                    lapWander = (math.random() * 3.0) - 1.5
+                                    lapWander = (math.random() * 1.6) - 0.8
                                     gasLevel = 0; brakeLevel = 0
-                                    local delayFrames = math.random(1, 4)
+                                    currentLateral = 0.0
+                                    local delayFrames = math.random(1, 2)
                                     steerBuf = {}
                                     for i = 1, delayFrames do steerBuf[i] = 0 end
                                     lapCount = lapCount + 1
