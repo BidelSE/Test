@@ -267,7 +267,7 @@ local function handleArbotas()
         printStringNow("~r~SAFETY: No blank line found — disconnecting...", 2000)
         lua_thread.create(function()
             wait(1500)
-            sampSendChat("/q")
+            pcall(sampSendChat, "/q")
         end)
     end
 end
@@ -288,7 +288,7 @@ local function handleFreeze(car)
             if freezeTimer == 90 and not freezeChatSent then
                 freezeChatSent = true
                 local msg = freezeChatResponses[math.random(#freezeChatResponses)]
-                sampSendChat(msg)
+                pcall(sampSendChat, msg)
             end
 
             -- Random input twitch roughly every 3 s (180 frames) with ±20% jitter
