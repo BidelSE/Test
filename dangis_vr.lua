@@ -188,14 +188,23 @@ local function getObstacleAhead(car, targetX, targetY)
     local d = math.sqrt(dx * dx + dy * dy)
     if d < 0.1 then return nil end
     local nx, ny = dx / d, dy / d
-    local ok, nearest = pcall(getClosestCar, carX + nx * 12, carY + ny * 12, carZ, 5.0, {}, 0)
-    if ok and nearest and nearest ~= 0 and nearest ~= car then return nearest end
+    local checkX = carX + nx * 12
+    local checkY = carY + ny * 12
+    local ok1, nearest = pcall(getClosestCar, checkX, checkY, carZ, 5.0, {}, 0)
+    if ok1 and nearest and nearest ~= 0 and nearest ~= car then
+        local ox, oy = getCarCoordinates(nearest)
+        return ox, oy
+    end
+    local ok2, nearObj = pcall(getClosestObject, checkX, checkY, carZ, 4.0, false, false)
+    if ok2 and nearObj and nearObj ~= 0 then
+        local ok3, ox, oy = pcall(getObjectCoordinates, nearObj)
+        if ok3 and ox then return ox, oy end
+    end
     return nil
 end
 
-local function avoidDir(car, obstacle, targetX, targetY)
+local function avoidDir(car, obsX, obsY, targetX, targetY)
     local carX, carY = getCarCoordinates(car)
-    local obsX, obsY = getCarCoordinates(obstacle)
     local dx = targetX - carX
     local dy = targetY - carY
     local d = math.sqrt(dx * dx + dy * dy)
@@ -483,8 +492,6 @@ function main()
                             end
 
                             draw_line(tX, tY)
-                            turning_mechanism(tX, tY, carX, carY, car)
-                            applySteerNoise()
 
                             local point = current_route[play_index]
                             local speedMult = 1.0
@@ -496,10 +503,10 @@ function main()
                             local targetSpeed = point.speed * speedMult
                             local currentSpeed = getCarSpeed(car)
 
-                            local obstacle = getObstacleAhead(car, tX, tY)
-                            if obstacle and collisionCooldown == 0 then
-                                collisionCooldown = 50
-                                avoidSteerDir = avoidDir(car, obstacle, tX, tY)
+                            local obsX, obsY = getObstacleAhead(car, tX, tY)
+                            if obsX and collisionCooldown == 0 then
+                                collisionCooldown = 51
+                                avoidSteerDir = avoidDir(car, obsX, obsY, tX, tY)
                             end
 
                             if collisionCooldown > 0 then
@@ -510,12 +517,16 @@ function main()
                                 writeMemory(0xB73458 + 0x20, 1, 0, false)
                                 writeMemory(0xB73458 + 0xC, 1, brakeLevel, false)
                             elseif sharpTurnAhead(current_route, play_index) and currentSpeed > targetSpeed * 0.7 then
+                                turning_mechanism(tX, tY, carX, carY, car)
+                                applySteerNoise()
                                 local excess = math.max(0, currentSpeed - targetSpeed * 0.7)
                                 brakeLevel = math.min(255, math.floor(excess * 30))
                                 gasLevel = math.max(0, gasLevel - 25)
                                 writeMemory(0xB73458 + 0x20, 1, gasLevel, false)
                                 writeMemory(0xB73458 + 0xC, 1, brakeLevel, false)
                             else
+                                turning_mechanism(tX, tY, carX, carY, car)
+                                applySteerNoise()
                                 if gasLiftFrames > 0 then
                                     gasLiftFrames = gasLiftFrames - 1
                                     gasLevel = 0
