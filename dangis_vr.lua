@@ -380,15 +380,16 @@ local function tryAnswerAntibotDialog(dPtr)
     if not u32ok then return false end
 
     lua_thread.create(function()
-        wait(700)
+        wait(400)                           -- let dialog fully render
+        wait(math.random(3000, 7000))       -- human thinking delay
         for _ = 1, emptyIdx do
-            u32.keybd_event(0x28, 0, 0, nil)  -- VK_DOWN keydown
-            u32.keybd_event(0x28, 0, 2, nil)  -- VK_DOWN keyup
-            wait(50)
+            u32.keybd_event(0x28, 0, 0, nil)
+            u32.keybd_event(0x28, 0, 2, nil)
+            wait(math.random(40, 90))       -- human-speed scrolling
         end
-        wait(300)
-        u32.keybd_event(0x0D, 0, 0, nil)  -- VK_RETURN keydown
-        u32.keybd_event(0x0D, 0, 2, nil)  -- VK_RETURN keyup
+        wait(math.random(300, 800))         -- pause before confirming
+        u32.keybd_event(0x0D, 0, 0, nil)
+        u32.keybd_event(0x0D, 0, 2, nil)
     end)
 
     return true
@@ -408,10 +409,9 @@ local function handleArbotas()
     writeMemory(0xB73458 + 0xC,  1, 0, false)
 
     if tryAnswerAntibotDialog(dPtr) then
-        printStringNow("~g~SAFETY: Atsakau i patikrinima...", 3000)
         lua_thread.create(function()
-            -- Wait up to 6s for dialog to close, then resume driving
-            for _ = 1, 60 do
+            -- Wait up to 15s for the answer + dialog close
+            for _ = 1, 150 do
                 wait(100)
                 local dp = readMemory(samp + 0x21A0B8, 4, true)
                 if dp == 0 or readMemory(dp + 0x28, 4, true) ~= 1 then
