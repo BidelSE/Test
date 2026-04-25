@@ -615,7 +615,7 @@ function main()
                 while i <= #trail - 1 do
                     local p  = trail[i]
                     local p2 = trail[i + 1]
-                    if getDistanceBetweenCoords2d(px, py, p.x, p.y) < 200 then
+                    if p and p2 and getDistanceBetweenCoords2d(px, py, p.x, p.y) < 200 then
                         if isPointOnScreen(p.x, p.y, p.z, 0.0) then
                             local sx,  sy  = convert3DCoordsToScreen(p.x,  p.y,  p.z)
                             local sx2, sy2 = convert3DCoordsToScreen(p2.x, p2.y, p2.z)
