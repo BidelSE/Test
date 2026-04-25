@@ -245,7 +245,7 @@ local function handleFreeze(car, route, pidx)
 end
 
 local function handleAdminRotate(car)
-    if isCrashing then return end
+    if not playing or isCrashing then return end
     local heading = getCarHeading(car)
     local diff = math.abs(heading - lastCarHeading)
     if diff > 180 then diff = 360 - diff end
@@ -261,7 +261,7 @@ local function handleAdminRotate(car)
 end
 
 local function handleArbotas()
-    if isCrashing or samp == 0 then return end
+    if not playing or isCrashing or samp == 0 then return end
     local dPtr = readMemory(samp + 0x21A0B8, 4, true)
     if dPtr == 0 then arbotasHandled = false; return end
     if readMemory(dPtr + 0x28, 4, true) ~= 1 then arbotasHandled = false; return end
