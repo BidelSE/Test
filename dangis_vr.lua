@@ -40,6 +40,7 @@ local nextBreakTime = 0
 local autoPaused = false
 
 local routeObstacleDist = math.huge
+local routeAvoidDir = 0
 local routeObstacleTimer = 0
 
 local showTrail = false
@@ -228,20 +229,35 @@ end
 local function scanRouteAhead(route, idx, car)
     local n = #route
     local best = math.huge
+    local bestDir = 0
     for i = idx + 10, math.min(idx + 200, n), 5 do
         local p = route[i]
+        local obX, obY = nil, nil
         local ok1, nearCar = pcall(getClosestCar, p.x, p.y, p.z, 6.0, {}, 0)
         if ok1 and nearCar and nearCar ~= 0 and nearCar ~= car then
-            local d = i - idx
-            if d < best then best = d end
+            local cx, cy = getCarCoordinates(nearCar)
+            obX, obY = cx, cy
         end
-        local ok2, nearObj = pcall(getClosestObject, p.x, p.y, p.z, 3.0, false, false)
-        if ok2 and nearObj and nearObj ~= 0 then
+        if not obX then
+            local ok2, nearObj = pcall(getClosestObject, p.x, p.y, p.z, 3.0, false, false)
+            if ok2 and nearObj and nearObj ~= 0 then
+                local ok3, ox, oy = pcall(getObjectCoordinates, nearObj)
+                if ok3 and ox then obX, obY = ox, oy end
+            end
+        end
+        if obX then
             local d = i - idx
-            if d < best then best = d end
+            if d < best then
+                best = d
+                local prev = route[math.max(1, i - 1)]
+                local rx = p.x - prev.x
+                local ry = p.y - prev.y
+                local cross = rx * (obY - p.y) - ry * (obX - p.x)
+                bestDir = cross > 0 and 1 or -1
+            end
         end
     end
-    return best
+    return best, bestDir
 end
 
 local function isPlayerControlling()
@@ -407,7 +423,7 @@ function main()
                     routeObstacleTimer = routeObstacleTimer + 1
                     if routeObstacleTimer >= 30 then
                         routeObstacleTimer = 0
-                        routeObstacleDist = scanRouteAhead(current_route, play_index, car)
+                        routeObstacleDist, routeAvoidDir = scanRouteAhead(current_route, play_index, car)
                     end
 
                     handleFreeze(car, current_route, play_index)
@@ -433,13 +449,18 @@ function main()
                         else
                             local tX, tY, tZ = getSplineTarget(current_route, play_index)
 
-                            if play_index < #current_route and lapWander ~= 0.0 then
+                            if play_index < #current_route then
                                 local ndx = current_route[play_index + 1].x - current_route[play_index].x
                                 local ndy = current_route[play_index + 1].y - current_route[play_index].y
                                 local nd = math.sqrt(ndx * ndx + ndy * ndy)
                                 if nd > 0.1 then
-                                    tX = tX + (-ndy / nd) * lapWander
-                                    tY = tY + (ndx / nd) * lapWander
+                                    local lateral = lapWander
+                                    if routeObstacleDist < 60 and routeAvoidDir ~= 0 then
+                                        local strength = (1.0 - routeObstacleDist / 60.0) * 4.0
+                                        lateral = lateral + routeAvoidDir * strength
+                                    end
+                                    tX = tX + (-ndy / nd) * lateral
+                                    tY = tY + (ndx / nd) * lateral
                                 end
                             end
 
