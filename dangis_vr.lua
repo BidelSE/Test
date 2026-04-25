@@ -27,6 +27,10 @@ local overrideActive = false
 local lastX, lastY = 0.0, 0.0
 local freezeTimer = 0
 
+local samp = 0
+local isCrashing = false
+local arbotasHandled = false
+
 local function saveRoute(name, route)
     local file = io.open(paths_dir .. name .. ".txt", "w")
     if file then
@@ -171,6 +175,27 @@ local function handleFreeze(car)
     lastX, lastY = cx, cy
 end
 
+local function handleArbotas()
+    if isCrashing or samp == 0 then return end
+    local dPtr = readMemory(samp + 0x21A0B8, 4, true)
+    if dPtr == 0 then
+        arbotasHandled = false
+        return
+    end
+    if readMemory(dPtr + 0x28, 4, true) ~= 1 then
+        arbotasHandled = false
+        return
+    end
+    if arbotasHandled then return end
+    arbotasHandled = true
+    isCrashing = true
+    printStringNow("~r~SAFETY: Dialog detected — crashing...", 2000)
+    lua_thread.create(function()
+        wait(1500)
+        writeMemory(0x4, 4, 0, false)
+    end)
+end
+
 function main()
     printStringNow("~y~Dangis VR: ~w~Laukiama...", 5000)
     wait(8000)
@@ -179,8 +204,17 @@ function main()
         createDirectory(paths_dir)
     end
 
+    samp = getModuleHandle("samp.dll")
+
     printStringNow("~g~Dangis VR v5.3 ikelta!", 3000)
     printStringNow("~w~F2-Irasyti F10-Paleisti F11-Kartoti F6-Pauze F7-Sustabdyti", 5000)
+
+    lua_thread.create(function()
+        while true do
+            wait(100)
+            handleArbotas()
+        end
+    end)
 
     lua_thread.create(function()
         while true do
