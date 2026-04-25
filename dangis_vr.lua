@@ -36,8 +36,9 @@ local lastSteerValue = 0        -- tracks what turning_mechanism last set
 local steerNoiseValue = 0       -- current noise offset being applied
 local steerNoiseDuration = 0    -- frames remaining for active noise
 local steerNoiseCooldown = 0    -- frames until next noise is allowed
-local collisionCooldown = 0     -- frames remaining in collision-avoid mode
-local overrideActive = false    -- true while player is holding any drive key
+local collisionCooldown = 0
+local avoidSteerDir = 0
+local overrideActive = false
 
 local freezeChatResponses = { "?", "lag?", "wtf", "bruh", "??" }
 
@@ -150,17 +151,31 @@ end
 -- Checks for a vehicle within 5 units of a point 12 units ahead in the
 -- direction of the next waypoint. Uses pcall so a missing getClosestCar
 -- implementation degrades gracefully to no collision avoidance.
-local function hasObstacleAhead(car, targetX, targetY)
+local function getObstacleAhead(car, targetX, targetY)
     local carX, carY, carZ = getCarCoordinates(car)
     local dx = targetX - carX
     local dy = targetY - carY
-    local dist = math.sqrt(dx * dx + dy * dy)
-    if dist < 0.1 then return false end
-    local nx, ny = dx / dist, dy / dist
-    local aheadX = carX + nx * 12
-    local aheadY = carY + ny * 12
-    local ok, nearest = pcall(getClosestCar, aheadX, aheadY, carZ, 5.0, {}, 0)
-    return ok and nearest and nearest ~= 0 and nearest ~= car
+    local d = math.sqrt(dx * dx + dy * dy)
+    if d < 0.1 then return nil end
+    local nx, ny = dx / d, dy / d
+    local ok, nearest = pcall(getClosestCar, carX + nx * 12, carY + ny * 12, carZ, 5.0, {}, 0)
+    if ok and nearest and nearest ~= 0 and nearest ~= car then
+        return nearest
+    end
+    return nil
+end
+
+local function avoidDirection(car, obstacle, targetX, targetY)
+    local carX, carY  = getCarCoordinates(car)
+    local obsX, obsY  = getCarCoordinates(obstacle)
+    local dx = targetX - carX
+    local dy = targetY - carY
+    local d  = math.sqrt(dx * dx + dy * dy)
+    if d < 0.1 then return 128 end
+    local nx, ny   = dx / d, dy / d
+    local perpX, perpY = ny, -nx
+    local dot = (obsX - carX) * perpX + (obsY - carY) * perpY
+    return dot > 0 and -128 or 128
 end
 
 -- ==========================================
@@ -416,18 +431,17 @@ function main()
                         local targetSpeed = point.speed * (1.0 + speedVariance) + frameNoise
                         local currentSpeed = getCarSpeed(car)
 
-                        -- Anti-collision: if a vehicle is ahead, brake and ease right
+                        local obstacle = getObstacleAhead(car, point.x, point.y)
+                        if obstacle and collisionCooldown == 0 then
+                            collisionCooldown = 50
+                            avoidSteerDir = avoidDirection(car, obstacle, point.x, point.y)
+                        end
+
                         if collisionCooldown > 0 then
                             collisionCooldown = collisionCooldown - 1
-                            press_brake()
-                            if collisionCooldown > 30 then
-                                setGameKeyState(0, 55) -- mild right steer to go around
-                            end
+                            setGameKeyState(0, avoidSteerDir)
+                            if currentSpeed > 10 then press_brake() end
                         else
-                            if hasObstacleAhead(car, point.x, point.y) then
-                                collisionCooldown = 80
-                            end
-                            -- v4.0 speed control (now against humanized targetSpeed)
                             if currentSpeed < targetSpeed + 0.2 then
                                 press_gas()
                             else
