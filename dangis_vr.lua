@@ -377,7 +377,7 @@ function main()
                     trailTick = trailTick + 1
                     if trailTick >= 8 then
                         trailTick = 0
-                        if #currentTrail < 3000 then
+                        if #currentTrail < 30000 then
                             table.insert(currentTrail, {x=carX, y=carY, z=carZ})
                         end
                     end
@@ -485,9 +485,6 @@ function main()
                                     steerBuf = {}
                                     for i = 1, delayFrames do steerBuf[i] = 0 end
                                     lapCount = lapCount + 1
-                                    lastTrail = currentTrail
-                                    currentTrail = {}
-                                    trailTick = 0
                                     showMsg("~g~Kilpa baigta! Kartojama!")
                                 else
                                     playing = false; play_index = 1
@@ -535,7 +532,6 @@ function main()
                 gasLevel = 0; brakeLevel = 0
                 autoPaused = false
                 steerBuf = {0, 0}
-                currentTrail = {}; lastTrail = {}; trailTick = 0
                 nextBreakTime = os.clock() + math.random(45, 90) * 60
                 if isCharInAnyCar(PLAYER_PED) then
                     lastCarHeading = getCarHeading(storeCarCharIsInNoSave(PLAYER_PED))
@@ -597,12 +593,15 @@ function main()
             gasLevel = 0; brakeLevel = 0
             writeMemory(0xB73458 + 0x20, 1, 0, false)
             writeMemory(0xB73458 + 0xC,  1, 0, false)
-            currentTrail = {}; lastTrail = {}; trailTick = 0
             showMsg("~r~Viskas sustabdyta!")
         end
 
-        if isKeyJustPressed(VK_F8) then
+        if isKeyJustPressed(VK_F9) then
             showTrail = not showTrail
+            if not showTrail then
+                currentTrail = {}
+                lastTrail = {}
+            end
             showMsg(showTrail and "~g~Trajektorija IJUNGTA!" or "~r~Trajektorija ISJUNGTA!")
         end
 
