@@ -37,6 +37,7 @@ local steerNoiseValue = 0       -- current noise offset being applied
 local steerNoiseDuration = 0    -- frames remaining for active noise
 local steerNoiseCooldown = 0    -- frames until next noise is allowed
 local collisionCooldown = 0     -- frames remaining in collision-avoid mode
+local overrideActive = false    -- true while player is holding any drive key
 
 local freezeChatResponses = { "?", "lag?", "wtf", "bruh", "??" }
 
@@ -375,13 +376,19 @@ function main()
                     -- Safety: freeze detection + humanization
                     handleFreeze(car)
 
-                    -- Safety: manual override
+                    -- Safety: manual override — player input wins, bot yields.
+                    -- Bot values are cleared once on the transition frame only.
+                    -- Writing zeros every frame cancels the player's W/A/S/D.
                     if isPlayerControlling() then
-                        writeMemory(0xB73458 + 0x20, 1, 0, false)
-                        writeMemory(0xB73458 + 0xC,  1, 0, false)
-                        setGameKeyState(0, 0)
+                        if not overrideActive then
+                            overrideActive = true
+                            writeMemory(0xB73458 + 0x20, 1, 0, false)
+                            writeMemory(0xB73458 + 0xC,  1, 0, false)
+                            setGameKeyState(0, 0)
+                        end
                         printStringNow("~y~OVERRIDE ACTIVE", 100)
                     else
+                        overrideActive = false
                         local point = current_route[play_index]
                         local carX, carY, carZ = getCarCoordinates(car)
 
