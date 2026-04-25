@@ -1,5 +1,5 @@
 script_name('dangis_vr')
-script_version('5.4')
+script_version('5.5')
 require 'lib.moonloader'
 
 local recording = false
@@ -31,6 +31,13 @@ local lastCarHeading = 0
 local reverseTimer = 0
 
 local steerBuf = {0, 0}
+local gasLevel = 0
+local brakeLevel = 0
+
+local lapWander = 0.0
+local lapCount = 0
+local nextBreakTime = 0
+local autoPaused = false
 
 local samp = 0
 local isCrashing = false
@@ -152,7 +159,7 @@ local function applySteerNoise()
     elseif steerNoiseCooldown > 0 then
         steerNoiseCooldown = steerNoiseCooldown - 1
     elseif math.random(100) <= 10 then
-        local range = (lastSteerValue == 0) and 25 or 12
+        local range = (lastSteerValue == 0) and 25 or 40
         steerNoiseValue = math.random(-range, range)
         steerNoiseDuration = math.random(2, 6)
         steerNoiseCooldown = math.random(8, 30)
@@ -222,6 +229,8 @@ local function handleFreeze(car, route, pidx)
         if freezeTimer > 30 then
             writeMemory(0xB73458 + 0x20, 1, 0, false)
             writeMemory(0xB73458 + 0xC,  1, 0, false)
+            gasLevel = 0
+            brakeLevel = 0
         end
         if freezeTimer > 150 and reverseTimer == 0 then
             local point = route[pidx]
@@ -253,7 +262,7 @@ local function handleAdminRotate(car)
         isCrashing = true
         printStringNow("~r~SAFETY: Admin rotate — crashing...", 1000)
         lua_thread.create(function()
-            wait(500)
+            wait(math.random(1500, 6000))
             doForceCrash()
         end)
     end
@@ -270,7 +279,7 @@ local function handleArbotas()
     isCrashing = true
     printStringNow("~r~SAFETY: Dialog detected — crashing...", 2000)
     lua_thread.create(function()
-        wait(300)
+        wait(math.random(2000, 8000))
         doForceCrash()
     end)
 end
@@ -280,7 +289,7 @@ function main()
     wait(8000)
     if not doesDirectoryExist(paths_dir) then createDirectory(paths_dir) end
     samp = getModuleHandle("samp.dll")
-    printStringNow("~g~Dangis VR v5.4 ikelta!", 3000)
+    printStringNow("~g~Dangis VR v5.5 ikelta!", 3000)
     printStringNow("~w~F2-Irasyti F10-Paleisti F11-Kartoti F6-Pauze F7-Sustabdyti", 5000)
 
     lua_thread.create(function()
@@ -330,10 +339,30 @@ function main()
                 if not isCharInAnyCar(PLAYER_PED) then
                     playing = false; repeating = false; paused = false
                     setGameKeyState(0, 0)
+                    gasLevel = 0; brakeLevel = 0
                     showMsg("~r~Vaziavimas sustabdytas - islejei masina!")
                 else
                     local car = storeCarCharIsInNoSave(PLAYER_PED)
                     local carX, carY, carZ = getCarCoordinates(car)
+
+                    if nextBreakTime > 0 and os.clock() >= nextBreakTime then
+                        autoPaused = true
+                        paused = true
+                        setGameKeyState(0, 0)
+                        gasLevel = 0; brakeLevel = 0
+                        writeMemory(0xB73458 + 0x20, 1, 0, false)
+                        writeMemory(0xB73458 + 0xC,  1, 0, false)
+                        nextBreakTime = 0
+                        local breakDuration = math.random(3, 12) * 60 * 1000
+                        lua_thread.create(function()
+                            wait(breakDuration)
+                            if autoPaused then
+                                autoPaused = false
+                                paused = false
+                                nextBreakTime = os.clock() + math.random(45, 90) * 60
+                            end
+                        end)
+                    end
 
                     handleFreeze(car, current_route, play_index)
                     handleAdminRotate(car)
@@ -344,6 +373,7 @@ function main()
                             writeMemory(0xB73458 + 0x20, 1, 0, false)
                             writeMemory(0xB73458 + 0xC,  1, 0, false)
                             setGameKeyState(0, 0)
+                            gasLevel = 0; brakeLevel = 0
                         end
                         printStringNow("~y~OVERRIDE ACTIVE", 100)
                     else
@@ -353,8 +383,20 @@ function main()
                             reverseTimer = reverseTimer - 1
                             press_brake()
                             setGameKeyState(0, 0)
+                            gasLevel = 0
                         else
                             local tX, tY, tZ = getSplineTarget(current_route, play_index)
+
+                            if play_index < #current_route and lapWander ~= 0.0 then
+                                local ndx = current_route[play_index + 1].x - current_route[play_index].x
+                                local ndy = current_route[play_index + 1].y - current_route[play_index].y
+                                local nd = math.sqrt(ndx * ndx + ndy * ndy)
+                                if nd > 0.1 then
+                                    tX = tX + (-ndy / nd) * lapWander
+                                    tY = tY + (ndx / nd) * lapWander
+                                end
+                            end
+
                             draw_line(tX, tY)
                             turning_mechanism(tX, tY, carX, carY, car)
                             applySteerNoise()
@@ -372,15 +414,27 @@ function main()
                             if collisionCooldown > 0 then
                                 collisionCooldown = collisionCooldown - 1
                                 setGameKeyState(0, avoidSteerDir)
-                                if currentSpeed > 10 then press_brake() end
+                                gasLevel = 0
+                                brakeLevel = currentSpeed > 10 and 255 or 0
+                                writeMemory(0xB73458 + 0x20, 1, 0, false)
+                                writeMemory(0xB73458 + 0xC, 1, brakeLevel, false)
                             elseif sharpTurnAhead(current_route, play_index) and currentSpeed > targetSpeed * 0.7 then
-                                press_brake()
+                                local excess = math.max(0, currentSpeed - targetSpeed * 0.7)
+                                brakeLevel = math.min(255, math.floor(excess * 30))
+                                gasLevel = math.max(0, gasLevel - 25)
+                                writeMemory(0xB73458 + 0x20, 1, gasLevel, false)
+                                writeMemory(0xB73458 + 0xC, 1, brakeLevel, false)
                             else
                                 if currentSpeed < targetSpeed + 0.2 then
-                                    press_gas()
+                                    gasLevel = math.min(255, gasLevel + 18)
+                                    brakeLevel = math.max(0, brakeLevel - 50)
                                 else
-                                    press_brake()
+                                    local excess = math.max(0, currentSpeed - targetSpeed)
+                                    brakeLevel = math.min(255, math.floor(excess * 30))
+                                    gasLevel = math.max(0, gasLevel - 25)
                                 end
+                                writeMemory(0xB73458 + 0x20, 1, gasLevel, false)
+                                writeMemory(0xB73458 + 0xC, 1, brakeLevel, false)
                             end
 
                             printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed) .. 'km/h', 100)
@@ -406,11 +460,18 @@ function main()
                             if play_index > #current_route then
                                 if repeating then
                                     play_index = 1
-                                    speedVariance = (math.random() * 0.14) - 0.07
+                                    speedVariance = (math.random() * 0.30) - 0.15
+                                    lapWander = (math.random() * 3.0) - 1.5
+                                    gasLevel = 0; brakeLevel = 0
+                                    local delayFrames = math.random(1, 4)
+                                    steerBuf = {}
+                                    for i = 1, delayFrames do steerBuf[i] = 0 end
+                                    lapCount = lapCount + 1
                                     showMsg("~g~Kilpa baigta! Kartojama!")
                                 else
                                     playing = false; play_index = 1
                                     setGameKeyState(0, 0)
+                                    gasLevel = 0; brakeLevel = 0
                                     showMsg("~g~Kelias baigtas!")
                                 end
                             end
@@ -447,7 +508,13 @@ function main()
 
         if isKeyJustPressed(VK_F10) then
             if not playing then
-                speedVariance = (math.random() * 0.14) - 0.07
+                speedVariance = (math.random() * 0.30) - 0.15
+                lapWander = (math.random() * 3.0) - 1.5
+                lapCount = 0
+                gasLevel = 0; brakeLevel = 0
+                autoPaused = false
+                steerBuf = {0, 0}
+                nextBreakTime = os.clock() + math.random(45, 90) * 60
                 if isCharInAnyCar(PLAYER_PED) then
                     lastCarHeading = getCarHeading(storeCarCharIsInNoSave(PLAYER_PED))
                 end
@@ -466,6 +533,9 @@ function main()
             else
                 playing = false
                 setGameKeyState(0, 0)
+                gasLevel = 0; brakeLevel = 0
+                writeMemory(0xB73458 + 0x20, 1, 0, false)
+                writeMemory(0xB73458 + 0xC,  1, 0, false)
                 showMsg("~r~Vaziavimas sustabdytas!")
             end
         end
@@ -477,15 +547,34 @@ function main()
 
         if isKeyJustPressed(VK_F6) then
             if playing then
-                paused = not paused
-                if paused then setGameKeyState(0, 0); showMsg("~y~Pristabdyta!")
-                else showMsg("~g~Tesiama!") end
+                if autoPaused then
+                    autoPaused = false
+                    paused = false
+                    nextBreakTime = os.clock() + math.random(45, 90) * 60
+                    showMsg("~g~Tesiama!")
+                else
+                    paused = not paused
+                    if paused then
+                        setGameKeyState(0, 0)
+                        gasLevel = 0; brakeLevel = 0
+                        writeMemory(0xB73458 + 0x20, 1, 0, false)
+                        writeMemory(0xB73458 + 0xC,  1, 0, false)
+                        showMsg("~y~Pristabdyta!")
+                    else
+                        nextBreakTime = os.clock() + math.random(45, 90) * 60
+                        showMsg("~g~Tesiama!")
+                    end
+                end
             end
         end
 
         if isKeyJustPressed(VK_F7) then
             recording = false; playing = false; repeating = false; paused = false
-            play_index = 1; setGameKeyState(0, 0)
+            autoPaused = false; play_index = 1
+            setGameKeyState(0, 0)
+            gasLevel = 0; brakeLevel = 0
+            writeMemory(0xB73458 + 0x20, 1, 0, false)
+            writeMemory(0xB73458 + 0xC,  1, 0, false)
             showMsg("~r~Viskas sustabdyta!")
         end
     end
