@@ -50,7 +50,6 @@ local S = {
     routeObstacleDist = math.huge, routeAvoidDir = 0, routeObstacleTimer = 0,
     currentLateral = 0.0, nudgeOffset = 0.0, nudgeFrames = 0, nextNudge = 0,
     frozenByAdmin = false, refreshSent = false,
-    hudFont = nil,
 }
 
 local LOOKAHEAD = 6
@@ -717,6 +716,10 @@ function main()
                             end
 
                             printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed) .. 'km/h', 100)
+                            _G.VR_gas     = gasLevel
+                            _G.VR_brake   = brakeLevel
+                            _G.VR_steer   = lastSteerValue
+                            _G.VR_playing = os.clock()  -- timestamp; HUD hides if not updated
 
                             if locateCharInCar2d(PLAYER_PED, point.x, point.y, routeRadius, routeRadius, false) then
                                 play_index = play_index + 1
@@ -862,28 +865,6 @@ function main()
             showMsg("~r~Viskas sustabdyta!")
         end
 
-        if isKeyJustPressed(VK_F3) then
-            local dp = readMemory(samp + 0x21A0B8, 4, true)
-            if dp ~= 0 and readMemory(dp + 0x28, 4, true) == 1 then
-                local ok = tryAnswerAntibotDialog(dp)
-                showMsg(ok and "~g~TEST: Atsakymas vykdomas..." or "~r~TEST: Tuscia eilute nerasta!")
-            elseif playing and not paused then
-                paused = true
-                setGameKeyState(0, 0)
-                gasLevel = 0; brakeLevel = 0
-                writeMemory(0xB73458 + 0x20, 1, 0, false)
-                writeMemory(0xB73458 + 0xC,  1, 0, false)
-                showMsg("~y~TEST: Sustojimas simuliuojamas...")
-                lua_thread.create(function()
-                    wait(math.random(3000, 8000))
-                    paused = false
-                    showMsg("~g~TEST: Tesiama!")
-                end)
-            else
-                showMsg("~r~TEST: Botas nestartavo arba nera dialogo!")
-            end
-        end
-
         if isKeyJustPressed(VK_F9) then
             showTrail = not showTrail
             if not showTrail then
@@ -927,30 +908,5 @@ function main()
             drawTrailArrows(currentTrail, 0xCC00FFFF)
         end
 
-        -- Lazy font creation
-        if not S.hudFont then
-            S.hudFont = renderFontCreate("Arial", 11, 1)
-        end
-
-        -- Live ASWD bot input display
-        if playing and S.hudFont then
-            local bx, by = 12, 12
-            local sz = 20
-            local wCol = gasLevel > 50   and 0xFF33DD33 or 0xFF333333
-            local sCol = brakeLevel > 50 and 0xFFDD3333 or 0xFF333333
-            local aCol = lastSteerValue < -60 and 0xFFFF9900 or 0xFF333333
-            local dCol = lastSteerValue >  60 and 0xFFFF9900 or 0xFF333333
-            renderDrawBox(bx + sz,      by,      sz, sz, wCol)
-            renderDrawBox(bx,           by + sz, sz, sz, aCol)
-            renderDrawBox(bx + sz,      by + sz, sz, sz, sCol)
-            renderDrawBox(bx + sz*2,    by + sz, sz, sz, dCol)
-            renderFontDrawText(S.hudFont, "W", bx + sz + 6,   by + 4,      0xFF000000)
-            renderFontDrawText(S.hudFont, "A", bx + 6,        by + sz + 4, 0xFF000000)
-            renderFontDrawText(S.hudFont, "S", bx + sz + 6,   by + sz + 4, 0xFF000000)
-            renderFontDrawText(S.hudFont, "D", bx + sz*2 + 6, by + sz + 4, 0xFF000000)
-            if _G.VR_TEST_FREEZE then
-                renderFontDrawText(S.hudFont, "FREEZE TEST", bx, by + sz*2 + 4, 0xFFFFFF00)
-            end
-        end
     end
 end

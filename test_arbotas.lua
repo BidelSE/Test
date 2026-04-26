@@ -70,7 +70,7 @@ function main()
 
         -- lazy font creation
         if not font then
-            font = renderFontCreate("Arial", 11, 1)
+            font = renderCreateFont("Arial", 11, 1)
         end
 
         if active and font then
