@@ -33,6 +33,7 @@ function main()
         if _G.VR_TEST_FREEZE and isCharInAnyCar(PLAYER_PED) then
             local car = storeCarCharIsInNoSave(PLAYER_PED)
             setCarCoordinates(car, frozenX, frozenY, frozenZ)
+            setCarVelocity(car, 0, 0, 0)
         end
     end
 end

@@ -313,8 +313,8 @@ local function handleFreeze(car, route, pidx)
     local cx, cy = getCarCoordinates(car)
     local speed = getCarSpeed(car)
     if _G.VR_TEST_FREEZE then
+        S.frozenByAdmin = true
         freezeTimer = freezeTimer + 1
-        if freezeTimer > 3 then S.frozenByAdmin = true end
         lastX, lastY = cx, cy
         return
     end
@@ -341,31 +341,32 @@ local function handleAdminRotate(car)
     local heading = getCarHeading(car)
     local diff = math.abs(heading - lastCarHeading)
     if diff > 180 then diff = 360 - diff end
-    if diff > 150 then
-        if _G.VR_TEST_ROTATE then
-            paused = true
-            setGameKeyState(0, 0)
-            gasLevel = 0; brakeLevel = 0
-            writeMemory(0xB73458 + 0x20, 1, 0, false)
-            writeMemory(0xB73458 + 0xC,  1, 0, false)
-            lua_thread.create(function()
-                wait(math.random(3000, 8000))
-                paused = false
-            end)
-        else
-            isCrashing = true
-            paused = true
-            setGameKeyState(0, 0)
-            gasLevel = 0; brakeLevel = 0
-            writeMemory(0xB73458 + 0x20, 1, 0, false)
-            writeMemory(0xB73458 + 0xC,  1, 0, false)
-            lua_thread.create(function()
-                wait(math.random(1500, 6000))
-                doForceCrash()
-            end)
-        end
-    end
+    local triggered = diff > 150 or (_G.VR_ADMIN_ROTATED == true)
+    if triggered then _G.VR_ADMIN_ROTATED = false end
     lastCarHeading = heading
+    if not triggered then return end
+    if _G.VR_TEST_ROTATE then
+        paused = true
+        setGameKeyState(0, 0)
+        gasLevel = 0; brakeLevel = 255
+        writeMemory(0xB73458 + 0x20, 1, 0, false)
+        writeMemory(0xB73458 + 0xC,  1, 255, false)
+        lua_thread.create(function()
+            wait(math.random(3000, 8000))
+            paused = false
+        end)
+    else
+        isCrashing = true
+        paused = true
+        setGameKeyState(0, 0)
+        gasLevel = 0; brakeLevel = 255
+        writeMemory(0xB73458 + 0x20, 1, 0, false)
+        writeMemory(0xB73458 + 0xC,  1, 255, false)
+        lua_thread.create(function()
+            wait(math.random(1500, 6000))
+            doForceCrash()
+        end)
+    end
 end
 
 local function readCString(addr, maxLen)
@@ -631,6 +632,7 @@ function main()
                             gasLevel = 0; brakeLevel = 255
                             writeMemory(0xB73458 + 0x20, 1, 0, false)
                             writeMemory(0xB73458 + 0xC,  1, 255, false)
+                            setCarVelocity(car, 0, 0, 0)
                             if freezeTimer > 150 then
                                 local iv = 180
                                 if freezeTimer % iv == 0 then
@@ -645,6 +647,11 @@ function main()
                                 S.refreshSent = true
                                 typeSAMPCommand("/refresh")
                             end
+                        elseif _G.VR_TEST_ARBOTAS then
+                            setGameKeyState(0, 0)
+                            gasLevel = 0; brakeLevel = 255
+                            writeMemory(0xB73458 + 0x20, 1, 0, false)
+                            writeMemory(0xB73458 + 0xC,  1, 255, false)
                         elseif not paused and not isCrashing then
                             local tX, tY, tZ = getSplineTarget(current_route, play_index)
 
@@ -732,10 +739,6 @@ function main()
                             end
 
                             printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed) .. 'km/h', 100)
-                            _G.VR_gas     = gasLevel
-                            _G.VR_brake   = brakeLevel
-                            _G.VR_steer   = lastSteerValue
-                            _G.VR_playing = os.clock()  -- timestamp; HUD hides if not updated
 
                             if locateCharInCar2d(PLAYER_PED, point.x, point.y, routeRadius, routeRadius, false) then
                                 play_index = play_index + 1
@@ -776,6 +779,11 @@ function main()
                                 end
                             end
                         end
+                        -- always export state to HUD while playing, regardless of pause/freeze
+                        _G.VR_gas     = gasLevel
+                        _G.VR_brake   = brakeLevel
+                        _G.VR_steer   = lastSteerValue
+                        _G.VR_playing = os.clock()
                     end
                 end
             end

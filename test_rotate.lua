@@ -18,6 +18,7 @@ function main()
                 local realCrash = isKeyDown(0x11)  -- Ctrl held = real crash
                 _G.VR_TEST_ROTATE = not realCrash
                 setCarHeading(car, (h + 180.0) % 360.0)
+                _G.VR_ADMIN_ROTATED = true
                 if not realCrash then
                     printStringNow("~y~TEST: Pasukta 180 (saugus - atsipirks)!", 2000)
                 else
