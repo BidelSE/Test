@@ -50,9 +50,6 @@ local S = {
     routeObstacleDist = math.huge, routeAvoidDir = 0, routeObstacleTimer = 0,
     currentLateral = 0.0, nudgeOffset = 0.0, nudgeFrames = 0, nextNudge = 0,
     frozenByAdmin = false, refreshSent = false,
-    testFreezeActive = false, testArbotasActive = false,
-    testArbotasLines = {}, testArbotasEmptyIdx = 0, testArbotasCursor = 1,
-    testArbotasBotResult = nil, testArbotasBotRunning = false,
     hudFont = nil,
 }
 
@@ -315,7 +312,7 @@ end
 local function handleFreeze(car, route, pidx)
     local cx, cy = getCarCoordinates(car)
     local speed = getCarSpeed(car)
-    if S.testFreezeActive then
+    if _G.VR_TEST_FREEZE then
         freezeTimer = freezeTimer + 1
         if freezeTimer > 3 then S.frozenByAdmin = true end
         lastX, lastY = cx, cy
@@ -345,16 +342,28 @@ local function handleAdminRotate(car)
     local diff = math.abs(heading - lastCarHeading)
     if diff > 180 then diff = 360 - diff end
     if diff > 150 then
-        isCrashing = true
-        paused = true
-        setGameKeyState(0, 0)
-        gasLevel = 0; brakeLevel = 0
-        writeMemory(0xB73458 + 0x20, 1, 0, false)
-        writeMemory(0xB73458 + 0xC,  1, 0, false)
-        lua_thread.create(function()
-            wait(math.random(1500, 6000))
-            doForceCrash()
-        end)
+        if _G.VR_TEST_ROTATE then
+            paused = true
+            setGameKeyState(0, 0)
+            gasLevel = 0; brakeLevel = 0
+            writeMemory(0xB73458 + 0x20, 1, 0, false)
+            writeMemory(0xB73458 + 0xC,  1, 0, false)
+            lua_thread.create(function()
+                wait(math.random(3000, 8000))
+                paused = false
+            end)
+        else
+            isCrashing = true
+            paused = true
+            setGameKeyState(0, 0)
+            gasLevel = 0; brakeLevel = 0
+            writeMemory(0xB73458 + 0x20, 1, 0, false)
+            writeMemory(0xB73458 + 0xC,  1, 0, false)
+            lua_thread.create(function()
+                wait(math.random(1500, 6000))
+                doForceCrash()
+            end)
+        end
     end
     lastCarHeading = heading
 end
@@ -875,86 +884,6 @@ function main()
             end
         end
 
-        if isKeyJustPressed(VK_F4) then
-            if isCharInAnyCar(PLAYER_PED) then
-                local car = storeCarCharIsInNoSave(PLAYER_PED)
-                local h = getCarHeading(car)
-                local newH = (h + 180.0) % 360.0
-                lastCarHeading = newH  -- update baseline so handleAdminRotate won't crash-trigger
-                setCarHeading(car, newH)
-                showMsg("~y~TEST: Masina pasukta 180 laipsniu!")
-            else
-                showMsg("~r~TEST: Turi buti masinos viduje!")
-            end
-        end
-
-        if isKeyJustPressed(VK_F5) then
-            if S.testArbotasActive then
-                S.testArbotasActive = false
-                S.testArbotasBotResult = nil
-                S.testArbotasBotRunning = false
-            else
-                local function fakeLine()
-                    local r = math.random(5)
-                    if r == 1 then
-                        return string.format("O(x %s y) = z^%d", math.random(2)==1 and "^" or "*", math.random(100, 9999))
-                    elseif r == 2 then
-                        return string.format("%d %d %05d", math.random(100,9999), math.random(1000,9999), math.random(10000,99999))
-                    elseif r == 3 then
-                        return string.format("%d + %05d", math.random(1000,9999), math.random(1000,99999))
-                    elseif r == 4 then
-                        return string.format("* %d %05d", math.random(1000,9999), math.random(10000,99999))
-                    else
-                        return string.format("|%s ; * %s%s%s", string.char(math.random(65,90)),
-                            string.char(math.random(97,122)), string.char(math.random(97,122)), string.char(math.random(97,122)))
-                    end
-                end
-                local nItems = math.random(8, 13)
-                local emptyPos = math.random(3, nItems)
-                S.testArbotasLines = {}
-                for i = 1, nItems do
-                    S.testArbotasLines[i] = (i == emptyPos) and "" or fakeLine()
-                end
-                S.testArbotasEmptyIdx = emptyPos
-                S.testArbotasCursor = 1
-                S.testArbotasBotResult = nil
-                S.testArbotasBotRunning = true
-                S.testArbotasActive = true
-                lua_thread.create(function()
-                    wait(math.random(3000, 7000))
-                    local presses = S.testArbotasEmptyIdx - 1
-                    for _ = 1, presses do
-                        S.testArbotasCursor = math.min(S.testArbotasCursor + 1, #S.testArbotasLines)
-                        wait(math.random(40, 90))
-                    end
-                    wait(math.random(300, 800))
-                    S.testArbotasBotResult = S.testArbotasLines[S.testArbotasCursor] == ""
-                    S.testArbotasBotRunning = false
-                    wait(3000)
-                    S.testArbotasActive = false
-                    S.testArbotasBotResult = nil
-                end)
-            end
-        end
-
-        if isKeyJustPressed(VK_F8) then
-            if S.testFreezeActive then
-                S.testFreezeActive = false
-                freezeTimer = 0
-                S.frozenByAdmin = false
-                S.refreshSent = false
-                showMsg("~g~TEST: Isfrizinta!")
-            else
-                if playing then
-                    S.testFreezeActive = true
-                    freezeTimer = 0
-                    showMsg("~y~TEST: Frizinamas... (F8 - isfrizinti)")
-                else
-                    showMsg("~r~TEST: Botas nestartavo!")
-                end
-            end
-        end
-
         if isKeyJustPressed(VK_F9) then
             showTrail = not showTrail
             if not showTrail then
@@ -1019,51 +948,8 @@ function main()
             renderFontDrawText(S.hudFont, "A", bx + 6,        by + sz + 4, 0xFF000000)
             renderFontDrawText(S.hudFont, "S", bx + sz + 6,   by + sz + 4, 0xFF000000)
             renderFontDrawText(S.hudFont, "D", bx + sz*2 + 6, by + sz + 4, 0xFF000000)
-            if S.testFreezeActive then
+            if _G.VR_TEST_FREEZE then
                 renderFontDrawText(S.hudFont, "FREEZE TEST", bx, by + sz*2 + 4, 0xFFFFFF00)
-            end
-        end
-
-        -- Arbotas test dialog
-        if S.testArbotasActive and S.hudFont then
-            local dw = 310
-            local lineH = 17
-            local headerH = 54
-            local dh = headerH + #S.testArbotasLines * lineH + 28
-            local dx = 485
-            local dy = 110
-            -- outer border
-            renderDrawBox(dx - 2, dy - 2, dw + 4, dh + 4, 0xFF888888)
-            -- body background
-            renderDrawBox(dx, dy, dw, dh, 0xFF111111)
-            -- title bar
-            renderDrawBox(dx, dy, dw, 18, 0xFF880000)
-            renderFontDrawText(S.hudFont, "Ar zmogus", dx + 4, dy + 2, 0xFFFFFFFF)
-            -- header lines
-            renderDrawBox(dx, dy + 18, dw, 18, 0xFF661111)
-            renderFontDrawText(S.hudFont, "Pasirinkite tuscia eilute", dx + 4, dy + 20, 0xFFFF6666)
-            renderFontDrawText(S.hudFont, "Pasirinkus blogai galima gauti Ban", dx + 4, dy + 36, 0xFFFF4444)
-            -- items
-            for i, line in ipairs(S.testArbotasLines) do
-                local ly = dy + headerH + (i - 1) * lineH
-                if i == S.testArbotasCursor then
-                    renderDrawBox(dx, ly, dw, lineH, 0xFF223366)
-                end
-                if line ~= "" then
-                    renderFontDrawText(S.hudFont, line, dx + 4, ly + 2, 0xFF44AAFF)
-                end
-            end
-            -- button bar
-            local btnY = dy + headerH + #S.testArbotasLines * lineH + 4
-            renderDrawBox(dx, btnY, dw, 20, 0xFF222222)
-            renderFontDrawText(S.hudFont, "[ Gerai ]", dx + dw/2 - 25, btnY + 2, 0xFFAAAAAA)
-            -- bot status
-            if S.testArbotasBotResult == true then
-                renderFontDrawText(S.hudFont, "BOT: Teisingai! (tuscia eilute surasta)", dx + 4, btnY + 4, 0xFF22FF22)
-            elseif S.testArbotasBotResult == false then
-                renderFontDrawText(S.hudFont, "BOT: Neteisingai!", dx + 4, btnY + 4, 0xFFFF2222)
-            elseif S.testArbotasBotRunning then
-                renderFontDrawText(S.hudFont, "BOT galvoja...", dx + 4, btnY + 4, 0xFFFFFF00)
             end
         end
     end
