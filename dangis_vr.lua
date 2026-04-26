@@ -798,6 +798,39 @@ function main()
             showMsg("~r~Viskas sustabdyta!")
         end
 
+        if isKeyJustPressed(VK_F3) then
+            local dp = readMemory(samp + 0x21A0B8, 4, true)
+            if dp ~= 0 and readMemory(dp + 0x28, 4, true) == 1 then
+                local ok = tryAnswerAntibotDialog(dp)
+                showMsg(ok and "~g~TEST: Atsakymas vykdomas..." or "~r~TEST: Tuscia eilute nerasta!")
+            elseif playing and not paused then
+                paused = true
+                setGameKeyState(0, 0)
+                gasLevel = 0; brakeLevel = 0
+                writeMemory(0xB73458 + 0x20, 1, 0, false)
+                writeMemory(0xB73458 + 0xC,  1, 0, false)
+                showMsg("~y~TEST: Sustojimas simuliuojamas...")
+                lua_thread.create(function()
+                    wait(math.random(3000, 8000))
+                    paused = false
+                    showMsg("~g~TEST: Tesiama!")
+                end)
+            else
+                showMsg("~r~TEST: Botas nestartavo arba nera dialogo!")
+            end
+        end
+
+        if isKeyJustPressed(VK_F4) then
+            if isCharInAnyCar(PLAYER_PED) then
+                local car = storeCarCharIsInNoSave(PLAYER_PED)
+                local h = getCarHeading(car)
+                setCarHeading(car, (h + 180.0) % 360.0)
+                showMsg("~y~TEST: Masina pasukta 180 laipsniu!")
+            else
+                showMsg("~r~TEST: Turi buti masinos viduje!")
+            end
+        end
+
         if isKeyJustPressed(VK_F9) then
             showTrail = not showTrail
             if not showTrail then
