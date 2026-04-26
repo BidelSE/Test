@@ -630,7 +630,7 @@ function main()
                                 S.refreshSent = true
                                 typeSAMPCommand("/refresh")
                             end
-                        else
+                        elseif not paused and not isCrashing then
                             local tX, tY, tZ = getSplineTarget(current_route, play_index)
 
                             if play_index < #current_route then
