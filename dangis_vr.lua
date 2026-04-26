@@ -311,7 +311,11 @@ local function handleAdminRotate(car)
     if diff > 180 then diff = 360 - diff end
     if diff > 150 then
         isCrashing = true
-        printStringNow("~r~SAFETY: Admin rotate — crashing...", 1000)
+        paused = true
+        setGameKeyState(0, 0)
+        gasLevel = 0; brakeLevel = 0
+        writeMemory(0xB73458 + 0x20, 1, 0, false)
+        writeMemory(0xB73458 + 0xC,  1, 0, false)
         lua_thread.create(function()
             wait(math.random(1500, 6000))
             doForceCrash()
@@ -426,7 +430,6 @@ local function handleArbotas()
         end)
     else
         isCrashing = true
-        printStringNow("~r~SAFETY: Dialog detected — crashing...", 2000)
         lua_thread.create(function()
             wait(math.random(2000, 8000))
             doForceCrash()
