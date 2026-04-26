@@ -60,7 +60,7 @@ function main()
     while true do
         wait(0)
 
-        if isKeyJustPressed(VK_F9) then
+        if isKeyJustPressed(VK_F12) then
             active = not active
             if active then
                 printStringNow("~g~Dialog spy ON", 1500)
