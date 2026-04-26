@@ -57,6 +57,15 @@ local samp = 0
 local isCrashing = false
 local arbotasHandled = false
 
+local testFreezeActive = false
+local testArbotasActive = false
+local testArbotasLines = {}
+local testArbotasEmptyIdx = 0
+local testArbotasCursor = 1
+local testArbotasBotResult = nil
+local testArbotasBotRunning = false
+local hudFont = nil
+
 local LOOKAHEAD = 6
 
 local function doForceCrash()
@@ -318,6 +327,12 @@ end
 local function handleFreeze(car, route, pidx)
     local cx, cy = getCarCoordinates(car)
     local speed = getCarSpeed(car)
+    if testFreezeActive then
+        freezeTimer = freezeTimer + 1
+        if freezeTimer > 3 then frozenByAdmin = true end
+        lastX, lastY = cx, cy
+        return
+    end
     if getDistanceBetweenCoords2d(cx, cy, lastX, lastY) < 0.1 and speed < 0.1 then
         freezeTimer = freezeTimer + 1
         if freezeTimer > 3 then frozenByAdmin = true end
@@ -437,6 +452,22 @@ local function handleArbotas()
     if dPtr == 0 then arbotasHandled = false; return end
     if readMemory(dPtr + 0x28, 4, true) ~= 1 then arbotasHandled = false; return end
     if arbotasHandled then return end
+    -- Skip non-arbotas dialogs (prevents crash when F1, server info dialogs, etc. open)
+    local foundMogus = false
+    for off = 0, 0x60, 4 do
+        local ptr = readMemory(dPtr + off, 4, false)
+        if ptr and ptr > 0x10000 and ptr < 0x7FFFFFFF then
+            local ok, s = pcall(readCString, ptr, 512)
+            if ok and s:lower():find("mogus") then foundMogus = true; break end
+        end
+    end
+    if not foundMogus then
+        for off = 0x2C, 0x200, 4 do
+            local ok, s = pcall(readCString, dPtr + off, 256)
+            if ok and s:lower():find("mogus") then foundMogus = true; break end
+        end
+    end
+    if not foundMogus then return end
     arbotasHandled = true
     paused = true
     setGameKeyState(0, 0)
@@ -860,10 +891,79 @@ function main()
             if isCharInAnyCar(PLAYER_PED) then
                 local car = storeCarCharIsInNoSave(PLAYER_PED)
                 local h = getCarHeading(car)
-                setCarHeading(car, (h + 180.0) % 360.0)
+                local newH = (h + 180.0) % 360.0
+                lastCarHeading = newH  -- update baseline so handleAdminRotate won't crash-trigger
+                setCarHeading(car, newH)
                 showMsg("~y~TEST: Masina pasukta 180 laipsniu!")
             else
                 showMsg("~r~TEST: Turi buti masinos viduje!")
+            end
+        end
+
+        if isKeyJustPressed(VK_F5) then
+            if testArbotasActive then
+                testArbotasActive = false
+                testArbotasBotResult = nil
+                testArbotasBotRunning = false
+            else
+                local function fakeLine()
+                    local r = math.random(5)
+                    if r == 1 then
+                        return string.format("O(x %s y) = z^%d", math.random(2)==1 and "^" or "*", math.random(100, 9999))
+                    elseif r == 2 then
+                        return string.format("%d %d %05d", math.random(100,9999), math.random(1000,9999), math.random(10000,99999))
+                    elseif r == 3 then
+                        return string.format("%d + %05d", math.random(1000,9999), math.random(1000,99999))
+                    elseif r == 4 then
+                        return string.format("* %d %05d", math.random(1000,9999), math.random(10000,99999))
+                    else
+                        return string.format("|%s ; * %s%s%s", string.char(math.random(65,90)),
+                            string.char(math.random(97,122)), string.char(math.random(97,122)), string.char(math.random(97,122)))
+                    end
+                end
+                local nItems = math.random(8, 13)
+                local emptyPos = math.random(3, nItems)
+                testArbotasLines = {}
+                for i = 1, nItems do
+                    testArbotasLines[i] = (i == emptyPos) and "" or fakeLine()
+                end
+                testArbotasEmptyIdx = emptyPos
+                testArbotasCursor = 1
+                testArbotasBotResult = nil
+                testArbotasBotRunning = true
+                testArbotasActive = true
+                lua_thread.create(function()
+                    wait(math.random(3000, 7000))
+                    local presses = testArbotasEmptyIdx - 1
+                    for _ = 1, presses do
+                        testArbotasCursor = math.min(testArbotasCursor + 1, #testArbotasLines)
+                        wait(math.random(40, 90))
+                    end
+                    wait(math.random(300, 800))
+                    testArbotasBotResult = testArbotasLines[testArbotasCursor] == ""
+                    testArbotasBotRunning = false
+                    wait(3000)
+                    testArbotasActive = false
+                    testArbotasBotResult = nil
+                end)
+            end
+        end
+
+        if isKeyJustPressed(VK_F8) then
+            if testFreezeActive then
+                testFreezeActive = false
+                freezeTimer = 0
+                frozenByAdmin = false
+                refreshSent = false
+                showMsg("~g~TEST: Isfrizinta!")
+            else
+                if playing then
+                    testFreezeActive = true
+                    freezeTimer = 0
+                    showMsg("~y~TEST: Frizinamas... (F8 - isfrizinti)")
+                else
+                    showMsg("~r~TEST: Botas nestartavo!")
+                end
             end
         end
 
@@ -908,6 +1008,75 @@ function main()
             end
             drawTrailArrows(lastTrail,    0xCCFFFF00)
             drawTrailArrows(currentTrail, 0xCC00FFFF)
+        end
+
+        -- Lazy font creation
+        if not hudFont then
+            hudFont = renderFontCreate("Arial", 11, 1)
+        end
+
+        -- Live ASWD bot input display
+        if playing and hudFont then
+            local bx, by = 12, 12
+            local sz = 20
+            local wCol = gasLevel > 50   and 0xFF33DD33 or 0xFF333333
+            local sCol = brakeLevel > 50 and 0xFFDD3333 or 0xFF333333
+            local aCol = lastSteerValue < -60 and 0xFFFF9900 or 0xFF333333
+            local dCol = lastSteerValue >  60 and 0xFFFF9900 or 0xFF333333
+            renderDrawBox(bx + sz,      by,      sz, sz, wCol)
+            renderDrawBox(bx,           by + sz, sz, sz, aCol)
+            renderDrawBox(bx + sz,      by + sz, sz, sz, sCol)
+            renderDrawBox(bx + sz*2,    by + sz, sz, sz, dCol)
+            renderFontDrawText(hudFont, "W", bx + sz + 6,   by + 4,      0xFF000000)
+            renderFontDrawText(hudFont, "A", bx + 6,        by + sz + 4, 0xFF000000)
+            renderFontDrawText(hudFont, "S", bx + sz + 6,   by + sz + 4, 0xFF000000)
+            renderFontDrawText(hudFont, "D", bx + sz*2 + 6, by + sz + 4, 0xFF000000)
+            if testFreezeActive then
+                renderFontDrawText(hudFont, "FREEZE TEST", bx, by + sz*2 + 4, 0xFFFFFF00)
+            end
+        end
+
+        -- Arbotas test dialog
+        if testArbotasActive and hudFont then
+            local dw = 310
+            local lineH = 17
+            local headerH = 54
+            local dh = headerH + #testArbotasLines * lineH + 28
+            local dx = 485
+            local dy = 110
+            -- outer border
+            renderDrawBox(dx - 2, dy - 2, dw + 4, dh + 4, 0xFF888888)
+            -- body background
+            renderDrawBox(dx, dy, dw, dh, 0xFF111111)
+            -- title bar
+            renderDrawBox(dx, dy, dw, 18, 0xFF880000)
+            renderFontDrawText(hudFont, "Ar zmogus", dx + 4, dy + 2, 0xFFFFFFFF)
+            -- header lines
+            renderDrawBox(dx, dy + 18, dw, 18, 0xFF661111)
+            renderFontDrawText(hudFont, "Pasirinkite tuscia eilute", dx + 4, dy + 20, 0xFFFF6666)
+            renderFontDrawText(hudFont, "Pasirinkus blogai galima gauti Ban", dx + 4, dy + 36, 0xFFFF4444)
+            -- items
+            for i, line in ipairs(testArbotasLines) do
+                local ly = dy + headerH + (i - 1) * lineH
+                if i == testArbotasCursor then
+                    renderDrawBox(dx, ly, dw, lineH, 0xFF223366)
+                end
+                if line ~= "" then
+                    renderFontDrawText(hudFont, line, dx + 4, ly + 2, 0xFF44AAFF)
+                end
+            end
+            -- button bar
+            local btnY = dy + headerH + #testArbotasLines * lineH + 4
+            renderDrawBox(dx, btnY, dw, 20, 0xFF222222)
+            renderFontDrawText(hudFont, "[ Gerai ]", dx + dw/2 - 25, btnY + 2, 0xFFAAAAAA)
+            -- bot status
+            if testArbotasBotResult == true then
+                renderFontDrawText(hudFont, "BOT: Teisingai! (tuscia eilute surasta)", dx + 4, btnY + 4, 0xFF22FF22)
+            elseif testArbotasBotResult == false then
+                renderFontDrawText(hudFont, "BOT: Neteisingai!", dx + 4, btnY + 4, 0xFFFF2222)
+            elseif testArbotasBotRunning then
+                renderFontDrawText(hudFont, "BOT galvoja...", dx + 4, btnY + 4, 0xFFFFFF00)
+            end
         end
     end
 end
