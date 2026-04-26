@@ -16,8 +16,6 @@ local tick = 0
 local recordingDelay = 80
 local lastRecordHeading = 0
 
-local gasLiftFrames = 0
-local nextGasLift = 0
 local lastSteerValue = 0
 local steerNoiseValue = 0
 local steerNoiseDuration = 0
@@ -35,18 +33,7 @@ local steerBuf = {0, 0}
 local gasLevel = 0
 local brakeLevel = 0
 
-local lapWander = 0.0
-local lapCount = 0
-local nextBreakTime = 0
-local autoPaused = false
 
-local routeObstacleDist = math.huge
-local routeAvoidDir = 0
-local routeObstacleTimer = 0
-local currentLateral = 0.0
-local nudgeOffset = 0.0
-local nudgeFrames = 0
-local nextNudge = 0
 
 local showTrail = false
 local currentTrail = {}
@@ -57,14 +44,17 @@ local samp = 0
 local isCrashing = false
 local arbotasHandled = false
 
-local testFreezeActive = false
-local testArbotasActive = false
-local testArbotasLines = {}
-local testArbotasEmptyIdx = 0
-local testArbotasCursor = 1
-local testArbotasBotResult = nil
-local testArbotasBotRunning = false
-local hudFont = nil
+local S = {
+    gasLiftFrames = 0, nextGasLift = 0,
+    lapWander = 0.0, lapCount = 0, nextBreakTime = 0, autoPaused = false,
+    routeObstacleDist = math.huge, routeAvoidDir = 0, routeObstacleTimer = 0,
+    currentLateral = 0.0, nudgeOffset = 0.0, nudgeFrames = 0, nextNudge = 0,
+    frozenByAdmin = false, refreshSent = false,
+    testFreezeActive = false, testArbotasActive = false,
+    testArbotasLines = {}, testArbotasEmptyIdx = 0, testArbotasCursor = 1,
+    testArbotasBotResult = nil, testArbotasBotRunning = false,
+    hudFont = nil,
+}
 
 local LOOKAHEAD = 6
 
@@ -291,8 +281,6 @@ local function isPlayerControlling()
     return isKeyDown(0x57) or isKeyDown(0x53) or isKeyDown(0x41) or isKeyDown(0x44) or isKeyDown(0x20)
 end
 
-local frozenByAdmin = false
-local refreshSent = false
 
 local function typeSAMPCommand(cmd)
     local ffiok, ffi = pcall(require, "ffi")
@@ -327,15 +315,15 @@ end
 local function handleFreeze(car, route, pidx)
     local cx, cy = getCarCoordinates(car)
     local speed = getCarSpeed(car)
-    if testFreezeActive then
+    if S.testFreezeActive then
         freezeTimer = freezeTimer + 1
-        if freezeTimer > 3 then frozenByAdmin = true end
+        if freezeTimer > 3 then S.frozenByAdmin = true end
         lastX, lastY = cx, cy
         return
     end
     if getDistanceBetweenCoords2d(cx, cy, lastX, lastY) < 0.1 and speed < 0.1 then
         freezeTimer = freezeTimer + 1
-        if freezeTimer > 3 then frozenByAdmin = true end
+        if freezeTimer > 3 then S.frozenByAdmin = true end
         if freezeTimer > 150 and reverseTimer == 0 then
             local point = route[pidx]
             local th = getHeadingFromVector2d(point.x - cx, point.y - cy)
@@ -345,8 +333,8 @@ local function handleFreeze(car, route, pidx)
         end
     else
         freezeTimer = 0
-        frozenByAdmin = false
-        refreshSent = false
+        S.frozenByAdmin = false
+        S.refreshSent = false
     end
     lastX, lastY = cx, cy
 end
@@ -561,21 +549,21 @@ function main()
                     local car = storeCarCharIsInNoSave(PLAYER_PED)
                     local carX, carY, carZ = getCarCoordinates(car)
 
-                    if nextBreakTime > 0 and os.clock() >= nextBreakTime then
-                        autoPaused = true
+                    if S.nextBreakTime > 0 and os.clock() >= S.nextBreakTime then
+                        S.autoPaused = true
                         paused = true
                         setGameKeyState(0, 0)
                         gasLevel = 0; brakeLevel = 0
                         writeMemory(0xB73458 + 0x20, 1, 0, false)
                         writeMemory(0xB73458 + 0xC,  1, 0, false)
-                        nextBreakTime = 0
+                        S.nextBreakTime = 0
                         local breakDuration = math.random(3, 12) * 60 * 1000
                         lua_thread.create(function()
                             wait(breakDuration)
-                            if autoPaused then
-                                autoPaused = false
+                            if S.autoPaused then
+                                S.autoPaused = false
                                 paused = false
-                                nextBreakTime = os.clock() + math.random(45, 90) * 60
+                                S.nextBreakTime = os.clock() + math.random(45, 90) * 60
                             end
                         end)
                     end
@@ -588,10 +576,10 @@ function main()
                         end
                     end
 
-                    routeObstacleTimer = routeObstacleTimer + 1
-                    if routeObstacleTimer >= 30 then
-                        routeObstacleTimer = 0
-                        routeObstacleDist, routeAvoidDir = scanRouteAhead(current_route, play_index, car)
+                    S.routeObstacleTimer = S.routeObstacleTimer + 1
+                    if S.routeObstacleTimer >= 30 then
+                        S.routeObstacleTimer = 0
+                        S.routeObstacleDist, S.routeAvoidDir = scanRouteAhead(current_route, play_index, car)
                     end
 
                     handleFreeze(car, current_route, play_index)
@@ -614,7 +602,7 @@ function main()
                             press_brake()
                             setGameKeyState(0, 0)
                             gasLevel = 0
-                        elseif frozenByAdmin then
+                        elseif S.frozenByAdmin then
                             setGameKeyState(0, 0)
                             gasLevel = 0; brakeLevel = 0
                             writeMemory(0xB73458 + 0x20, 1, 0, false)
@@ -629,8 +617,8 @@ function main()
                                     end
                                 end
                             end
-                            if freezeTimer >= 480 and not refreshSent then
-                                refreshSent = true
+                            if freezeTimer >= 480 and not S.refreshSent then
+                                S.refreshSent = true
                                 typeSAMPCommand("/refresh")
                             end
                         else
@@ -641,22 +629,22 @@ function main()
                                 local ndy = current_route[play_index + 1].y - current_route[play_index].y
                                 local nd = math.sqrt(ndx * ndx + ndy * ndy)
                                 if nd > 0.1 then
-                                    if nudgeFrames > 0 then
-                                        nudgeFrames = nudgeFrames - 1
-                                        if nudgeFrames == 0 then nudgeOffset = 0.0 end
-                                    elseif os.clock() >= nextNudge then
-                                        nudgeOffset = (math.random() * 2.4) - 1.2
-                                        nudgeFrames = math.random(80, 160)
-                                        nextNudge = os.clock() + math.random(15, 45)
+                                    if S.nudgeFrames > 0 then
+                                        S.nudgeFrames = S.nudgeFrames - 1
+                                        if S.nudgeFrames == 0 then S.nudgeOffset = 0.0 end
+                                    elseif os.clock() >= S.nextNudge then
+                                        S.nudgeOffset = (math.random() * 2.4) - 1.2
+                                        S.nudgeFrames = math.random(80, 160)
+                                        S.nextNudge = os.clock() + math.random(15, 45)
                                     end
-                                    local targetLateral = lapWander + nudgeOffset
-                                    if routeObstacleDist < 60 and routeAvoidDir ~= 0 then
-                                        local strength = (1.0 - routeObstacleDist / 60.0) * 2.0
-                                        targetLateral = targetLateral + routeAvoidDir * strength
+                                    local targetLateral = S.lapWander + S.nudgeOffset
+                                    if S.routeObstacleDist < 60 and S.routeAvoidDir ~= 0 then
+                                        local strength = (1.0 - S.routeObstacleDist / 60.0) * 2.0
+                                        targetLateral = targetLateral + S.routeAvoidDir * strength
                                     end
-                                    currentLateral = currentLateral + (targetLateral - currentLateral) * 0.04
-                                    tX = tX + (-ndy / nd) * currentLateral
-                                    tY = tY + (ndx / nd) * currentLateral
+                                    S.currentLateral = S.currentLateral + (targetLateral - S.currentLateral) * 0.04
+                                    tX = tX + (-ndy / nd) * S.currentLateral
+                                    tY = tY + (ndx / nd) * S.currentLateral
                                 end
                             end
 
@@ -664,9 +652,9 @@ function main()
 
                             local point = current_route[play_index]
                             local speedMult = 1.0
-                            if routeObstacleDist < 100 then
-                                speedMult = routeObstacleDist >= 20
-                                    and (0.5 + (routeObstacleDist - 20) / 80 * 0.5)
+                            if S.routeObstacleDist < 100 then
+                                speedMult = S.routeObstacleDist >= 20
+                                    and (0.5 + (S.routeObstacleDist - 20) / 80 * 0.5)
                                     or 0.4
                             end
                             local targetSpeed = point.speed * speedMult
@@ -696,13 +684,13 @@ function main()
                             else
                                 turning_mechanism(tX, tY, carX, carY, car)
                                 applySteerNoise()
-                                if gasLiftFrames > 0 then
-                                    gasLiftFrames = gasLiftFrames - 1
+                                if S.gasLiftFrames > 0 then
+                                    S.gasLiftFrames = S.gasLiftFrames - 1
                                     gasLevel = 0
                                     brakeLevel = 0
-                                elseif os.clock() >= nextGasLift then
-                                    gasLiftFrames = math.random(18, 45)
-                                    nextGasLift = os.clock() + math.random(20, 60)
+                                elseif os.clock() >= S.nextGasLift then
+                                    S.gasLiftFrames = math.random(18, 45)
+                                    S.nextGasLift = os.clock() + math.random(20, 60)
                                 else
                                     if currentSpeed < targetSpeed then
                                         gasLevel = math.min(255, gasLevel + 18)
@@ -742,15 +730,15 @@ function main()
                             if play_index > #current_route then
                                 if repeating then
                                     play_index = 1
-                                    lapWander = (math.random() * 3.0) - 1.5
+                                    S.lapWander = (math.random() * 3.0) - 1.5
                                     gasLevel = 0; brakeLevel = 0
-                                    gasLiftFrames = 0
-                                    nudgeFrames = 0; nudgeOffset = 0.0
-                                    currentLateral = 0.0
+                                    S.gasLiftFrames = 0
+                                    S.nudgeFrames = 0; S.nudgeOffset = 0.0
+                                    S.currentLateral = 0.0
                                     local delayFrames = math.random(1, 2)
                                     steerBuf = {}
                                     for i = 1, delayFrames do steerBuf[i] = 0 end
-                                    lapCount = lapCount + 1
+                                    S.lapCount = S.lapCount + 1
                                     showMsg("~g~Kilpa baigta! Kartojama!")
                                 else
                                     playing = false; play_index = 1
@@ -792,16 +780,16 @@ function main()
 
         if isKeyJustPressed(VK_F10) then
             if not playing then
-                lapWander = (math.random() * 3.0) - 1.5
-                lapCount = 0
+                S.lapWander = (math.random() * 3.0) - 1.5
+                S.lapCount = 0
                 gasLevel = 0; brakeLevel = 0
-                gasLiftFrames = 0
-                nextGasLift = os.clock() + math.random(20, 60)
-                nudgeFrames = 0; nudgeOffset = 0.0
-                nextNudge = os.clock() + math.random(12, 40)
-                autoPaused = false
+                S.gasLiftFrames = 0
+                S.nextGasLift = os.clock() + math.random(20, 60)
+                S.nudgeFrames = 0; S.nudgeOffset = 0.0
+                S.nextNudge = os.clock() + math.random(12, 40)
+                S.autoPaused = false
                 steerBuf = {0, 0}
-                nextBreakTime = os.clock() + math.random(45, 90) * 60
+                S.nextBreakTime = os.clock() + math.random(45, 90) * 60
                 if isCharInAnyCar(PLAYER_PED) then
                     lastCarHeading = getCarHeading(storeCarCharIsInNoSave(PLAYER_PED))
                 end
@@ -834,10 +822,10 @@ function main()
 
         if isKeyJustPressed(VK_F6) then
             if playing then
-                if autoPaused then
-                    autoPaused = false
+                if S.autoPaused then
+                    S.autoPaused = false
                     paused = false
-                    nextBreakTime = os.clock() + math.random(45, 90) * 60
+                    S.nextBreakTime = os.clock() + math.random(45, 90) * 60
                     showMsg("~g~Tesiama!")
                 else
                     paused = not paused
@@ -848,7 +836,7 @@ function main()
                         writeMemory(0xB73458 + 0xC,  1, 0, false)
                         showMsg("~y~Pristabdyta!")
                     else
-                        nextBreakTime = os.clock() + math.random(45, 90) * 60
+                        S.nextBreakTime = os.clock() + math.random(45, 90) * 60
                         showMsg("~g~Tesiama!")
                     end
                 end
@@ -857,7 +845,7 @@ function main()
 
         if isKeyJustPressed(VK_F7) then
             recording = false; playing = false; repeating = false; paused = false
-            autoPaused = false; play_index = 1
+            S.autoPaused = false; play_index = 1
             setGameKeyState(0, 0)
             gasLevel = 0; brakeLevel = 0
             writeMemory(0xB73458 + 0x20, 1, 0, false)
@@ -901,10 +889,10 @@ function main()
         end
 
         if isKeyJustPressed(VK_F5) then
-            if testArbotasActive then
-                testArbotasActive = false
-                testArbotasBotResult = nil
-                testArbotasBotRunning = false
+            if S.testArbotasActive then
+                S.testArbotasActive = false
+                S.testArbotasBotResult = nil
+                S.testArbotasBotRunning = false
             else
                 local function fakeLine()
                     local r = math.random(5)
@@ -923,42 +911,42 @@ function main()
                 end
                 local nItems = math.random(8, 13)
                 local emptyPos = math.random(3, nItems)
-                testArbotasLines = {}
+                S.testArbotasLines = {}
                 for i = 1, nItems do
-                    testArbotasLines[i] = (i == emptyPos) and "" or fakeLine()
+                    S.testArbotasLines[i] = (i == emptyPos) and "" or fakeLine()
                 end
-                testArbotasEmptyIdx = emptyPos
-                testArbotasCursor = 1
-                testArbotasBotResult = nil
-                testArbotasBotRunning = true
-                testArbotasActive = true
+                S.testArbotasEmptyIdx = emptyPos
+                S.testArbotasCursor = 1
+                S.testArbotasBotResult = nil
+                S.testArbotasBotRunning = true
+                S.testArbotasActive = true
                 lua_thread.create(function()
                     wait(math.random(3000, 7000))
-                    local presses = testArbotasEmptyIdx - 1
+                    local presses = S.testArbotasEmptyIdx - 1
                     for _ = 1, presses do
-                        testArbotasCursor = math.min(testArbotasCursor + 1, #testArbotasLines)
+                        S.testArbotasCursor = math.min(S.testArbotasCursor + 1, #S.testArbotasLines)
                         wait(math.random(40, 90))
                     end
                     wait(math.random(300, 800))
-                    testArbotasBotResult = testArbotasLines[testArbotasCursor] == ""
-                    testArbotasBotRunning = false
+                    S.testArbotasBotResult = S.testArbotasLines[S.testArbotasCursor] == ""
+                    S.testArbotasBotRunning = false
                     wait(3000)
-                    testArbotasActive = false
-                    testArbotasBotResult = nil
+                    S.testArbotasActive = false
+                    S.testArbotasBotResult = nil
                 end)
             end
         end
 
         if isKeyJustPressed(VK_F8) then
-            if testFreezeActive then
-                testFreezeActive = false
+            if S.testFreezeActive then
+                S.testFreezeActive = false
                 freezeTimer = 0
-                frozenByAdmin = false
-                refreshSent = false
+                S.frozenByAdmin = false
+                S.refreshSent = false
                 showMsg("~g~TEST: Isfrizinta!")
             else
                 if playing then
-                    testFreezeActive = true
+                    S.testFreezeActive = true
                     freezeTimer = 0
                     showMsg("~y~TEST: Frizinamas... (F8 - isfrizinti)")
                 else
@@ -1011,12 +999,12 @@ function main()
         end
 
         -- Lazy font creation
-        if not hudFont then
-            hudFont = renderFontCreate("Arial", 11, 1)
+        if not S.hudFont then
+            S.hudFont = renderFontCreate("Arial", 11, 1)
         end
 
         -- Live ASWD bot input display
-        if playing and hudFont then
+        if playing and S.hudFont then
             local bx, by = 12, 12
             local sz = 20
             local wCol = gasLevel > 50   and 0xFF33DD33 or 0xFF333333
@@ -1027,21 +1015,21 @@ function main()
             renderDrawBox(bx,           by + sz, sz, sz, aCol)
             renderDrawBox(bx + sz,      by + sz, sz, sz, sCol)
             renderDrawBox(bx + sz*2,    by + sz, sz, sz, dCol)
-            renderFontDrawText(hudFont, "W", bx + sz + 6,   by + 4,      0xFF000000)
-            renderFontDrawText(hudFont, "A", bx + 6,        by + sz + 4, 0xFF000000)
-            renderFontDrawText(hudFont, "S", bx + sz + 6,   by + sz + 4, 0xFF000000)
-            renderFontDrawText(hudFont, "D", bx + sz*2 + 6, by + sz + 4, 0xFF000000)
-            if testFreezeActive then
-                renderFontDrawText(hudFont, "FREEZE TEST", bx, by + sz*2 + 4, 0xFFFFFF00)
+            renderFontDrawText(S.hudFont, "W", bx + sz + 6,   by + 4,      0xFF000000)
+            renderFontDrawText(S.hudFont, "A", bx + 6,        by + sz + 4, 0xFF000000)
+            renderFontDrawText(S.hudFont, "S", bx + sz + 6,   by + sz + 4, 0xFF000000)
+            renderFontDrawText(S.hudFont, "D", bx + sz*2 + 6, by + sz + 4, 0xFF000000)
+            if S.testFreezeActive then
+                renderFontDrawText(S.hudFont, "FREEZE TEST", bx, by + sz*2 + 4, 0xFFFFFF00)
             end
         end
 
         -- Arbotas test dialog
-        if testArbotasActive and hudFont then
+        if S.testArbotasActive and S.hudFont then
             local dw = 310
             local lineH = 17
             local headerH = 54
-            local dh = headerH + #testArbotasLines * lineH + 28
+            local dh = headerH + #S.testArbotasLines * lineH + 28
             local dx = 485
             local dy = 110
             -- outer border
@@ -1050,32 +1038,32 @@ function main()
             renderDrawBox(dx, dy, dw, dh, 0xFF111111)
             -- title bar
             renderDrawBox(dx, dy, dw, 18, 0xFF880000)
-            renderFontDrawText(hudFont, "Ar zmogus", dx + 4, dy + 2, 0xFFFFFFFF)
+            renderFontDrawText(S.hudFont, "Ar zmogus", dx + 4, dy + 2, 0xFFFFFFFF)
             -- header lines
             renderDrawBox(dx, dy + 18, dw, 18, 0xFF661111)
-            renderFontDrawText(hudFont, "Pasirinkite tuscia eilute", dx + 4, dy + 20, 0xFFFF6666)
-            renderFontDrawText(hudFont, "Pasirinkus blogai galima gauti Ban", dx + 4, dy + 36, 0xFFFF4444)
+            renderFontDrawText(S.hudFont, "Pasirinkite tuscia eilute", dx + 4, dy + 20, 0xFFFF6666)
+            renderFontDrawText(S.hudFont, "Pasirinkus blogai galima gauti Ban", dx + 4, dy + 36, 0xFFFF4444)
             -- items
-            for i, line in ipairs(testArbotasLines) do
+            for i, line in ipairs(S.testArbotasLines) do
                 local ly = dy + headerH + (i - 1) * lineH
-                if i == testArbotasCursor then
+                if i == S.testArbotasCursor then
                     renderDrawBox(dx, ly, dw, lineH, 0xFF223366)
                 end
                 if line ~= "" then
-                    renderFontDrawText(hudFont, line, dx + 4, ly + 2, 0xFF44AAFF)
+                    renderFontDrawText(S.hudFont, line, dx + 4, ly + 2, 0xFF44AAFF)
                 end
             end
             -- button bar
-            local btnY = dy + headerH + #testArbotasLines * lineH + 4
+            local btnY = dy + headerH + #S.testArbotasLines * lineH + 4
             renderDrawBox(dx, btnY, dw, 20, 0xFF222222)
-            renderFontDrawText(hudFont, "[ Gerai ]", dx + dw/2 - 25, btnY + 2, 0xFFAAAAAA)
+            renderFontDrawText(S.hudFont, "[ Gerai ]", dx + dw/2 - 25, btnY + 2, 0xFFAAAAAA)
             -- bot status
-            if testArbotasBotResult == true then
-                renderFontDrawText(hudFont, "BOT: Teisingai! (tuscia eilute surasta)", dx + 4, btnY + 4, 0xFF22FF22)
-            elseif testArbotasBotResult == false then
-                renderFontDrawText(hudFont, "BOT: Neteisingai!", dx + 4, btnY + 4, 0xFFFF2222)
-            elseif testArbotasBotRunning then
-                renderFontDrawText(hudFont, "BOT galvoja...", dx + 4, btnY + 4, 0xFFFFFF00)
+            if S.testArbotasBotResult == true then
+                renderFontDrawText(S.hudFont, "BOT: Teisingai! (tuscia eilute surasta)", dx + 4, btnY + 4, 0xFF22FF22)
+            elseif S.testArbotasBotResult == false then
+                renderFontDrawText(S.hudFont, "BOT: Neteisingai!", dx + 4, btnY + 4, 0xFFFF2222)
+            elseif S.testArbotasBotRunning then
+                renderFontDrawText(S.hudFont, "BOT galvoja...", dx + 4, btnY + 4, 0xFFFFFF00)
             end
         end
     end
