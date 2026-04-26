@@ -49,7 +49,7 @@ local S = {
     lapWander = 0.0, lapCount = 0, nextBreakTime = 0, autoPaused = false,
     routeObstacleDist = math.huge, routeAvoidDir = 0, routeObstacleTimer = 0,
     currentLateral = 0.0, nudgeOffset = 0.0, nudgeFrames = 0, nextNudge = 0,
-    frozenByAdmin = false, refreshSent = false,
+    frozenByAdmin = false, refreshSent = false, refreshTarget = 300,
     testArbotasPaused = false,
 }
 
@@ -332,6 +332,7 @@ local function handleFreeze(car, route, pidx)
         freezeTimer = 0
         S.frozenByAdmin = false
         S.refreshSent = false
+        S.refreshTarget = math.random(200, 520)
     end
     lastX, lastY = cx, cy
 end
@@ -352,7 +353,10 @@ local function handleAdminRotate(car)
         writeMemory(0xB73458 + 0x20, 1, 0, false)
         writeMemory(0xB73458 + 0xC,  1, 255, false)
         lua_thread.create(function()
-            wait(math.random(3000, 8000))
+            wait(math.random(800, 2500))   -- panic brake visible briefly
+            brakeLevel = 0
+            writeMemory(0xB73458 + 0xC, 1, 0, false)
+            wait(math.random(2000, 6000))  -- sit still, confused
             paused = false
         end)
     else
@@ -363,7 +367,10 @@ local function handleAdminRotate(car)
         writeMemory(0xB73458 + 0x20, 1, 0, false)
         writeMemory(0xB73458 + 0xC,  1, 255, false)
         lua_thread.create(function()
-            wait(math.random(1500, 6000))
+            wait(math.random(800, 2500))   -- panic brake visible briefly
+            brakeLevel = 0
+            writeMemory(0xB73458 + 0xC, 1, 0, false)
+            wait(math.random(1500, 5000))  -- sit still, then crash
             doForceCrash()
         end)
     end
@@ -629,10 +636,9 @@ function main()
                             gasLevel = 0
                         elseif S.frozenByAdmin then
                             setGameKeyState(0, 0)
-                            gasLevel = 0; brakeLevel = 255
+                            gasLevel = 0; brakeLevel = 0
                             writeMemory(0xB73458 + 0x20, 1, 0, false)
-                            writeMemory(0xB73458 + 0xC,  1, 255, false)
-                            setCarVelocity(car, 0, 0, 0)
+                            writeMemory(0xB73458 + 0xC,  1, 0, false)
                             if freezeTimer > 150 then
                                 local iv = 180
                                 if freezeTimer % iv == 0 then
@@ -643,15 +649,16 @@ function main()
                                     end
                                 end
                             end
-                            if freezeTimer >= 480 and not S.refreshSent then
+                            if freezeTimer >= S.refreshTarget and not S.refreshSent then
                                 S.refreshSent = true
                                 typeSAMPCommand("/refresh")
                             end
                         elseif _G.VR_TEST_ARBOTAS then
                             setGameKeyState(0, 0)
-                            gasLevel = 0; brakeLevel = 255
+                            gasLevel = 0
+                            brakeLevel = getCarSpeed(car) > 0.5 and 255 or 0
                             writeMemory(0xB73458 + 0x20, 1, 0, false)
-                            writeMemory(0xB73458 + 0xC,  1, 255, false)
+                            writeMemory(0xB73458 + 0xC,  1, brakeLevel, false)
                         elseif not paused and not isCrashing then
                             local tX, tY, tZ = getSplineTarget(current_route, play_index)
 
