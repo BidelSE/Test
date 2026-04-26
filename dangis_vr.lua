@@ -282,17 +282,14 @@ local function isPlayerControlling()
     return isKeyDown(0x57) or isKeyDown(0x53) or isKeyDown(0x41) or isKeyDown(0x44) or isKeyDown(0x20)
 end
 
+local frozenByAdmin = false
+
 local function handleFreeze(car, route, pidx)
     local cx, cy = getCarCoordinates(car)
     local speed = getCarSpeed(car)
     if getDistanceBetweenCoords2d(cx, cy, lastX, lastY) < 0.1 and speed < 0.1 then
         freezeTimer = freezeTimer + 1
-        if freezeTimer > 30 then
-            writeMemory(0xB73458 + 0x20, 1, 0, false)
-            writeMemory(0xB73458 + 0xC,  1, 0, false)
-            gasLevel = 0
-            brakeLevel = 0
-        end
+        if freezeTimer > 3 then frozenByAdmin = true end
         if freezeTimer > 150 and reverseTimer == 0 then
             local point = route[pidx]
             local th = getHeadingFromVector2d(point.x - cx, point.y - cy)
@@ -300,16 +297,9 @@ local function handleFreeze(car, route, pidx)
             if diff > 180 then diff = 360 - diff end
             if diff > 100 then reverseTimer = 80 end
         end
-        local interval = math.random(150, 210)
-        if freezeTimer % interval == 0 then
-            if math.random(2) == 1 then
-                writeMemory(0xB73458 + 0x20, 1, math.random(80, 160), false)
-            else
-                setGameKeyState(0, math.random(2) == 1 and math.random(30, 60) or math.random(-60, -30))
-            end
-        end
     else
         freezeTimer = 0
+        frozenByAdmin = false
     end
     lastX, lastY = cx, cy
 end
@@ -337,8 +327,9 @@ local function readCString(addr, maxLen)
         for i = 0, (maxLen or 512) - 1 do
             local b = readMemory(addr + i, 1, false)
             if b == 0 then break end
-            if b == 10 or (b >= 32 and b <= 126) then
-                s = s .. string.char(b)
+            if b == 10 then s = s .. "\n"
+            elseif b >= 32 and b <= 126 then s = s .. string.char(b)
+            elseif b > 126 then s = s .. " "  -- extended ASCII (e.g. Lithuanian ž) → space
             end
         end
     end)
@@ -349,29 +340,38 @@ local function tryAnswerAntibotDialog(dPtr)
     local ffiok, ffi = pcall(require, "ffi")
     if not ffiok then return false end
 
-    -- dPtr + 0x0C = char* title,  dPtr + 0x10 = char* items (newline-separated)
-    -- These offsets are for SAMP 0.3.7 R1 — adjust if dialog reading fails
-    local titlePtr = readMemory(dPtr + 0x0C, 4, false)
-    local textPtr  = readMemory(dPtr + 0x10, 4, false)
-
-    local title = readCString(titlePtr, 128):gsub("{%x%x%x%x%x%x}", ""):lower()
-    local text  = readCString(textPtr, 4096):gsub("{%x%x%x%x%x%x}", "")
-
-    -- Only handle the "Ar žmogus" / "are you human" captcha dialog
-    if not (title:find("mogus") or title:find("human")) then return false end
-    if #text == 0 then return false end
-
-    -- Split items by \n, find the last empty one (the correct answer)
-    local items = {}
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-        table.insert(items, line)
+    -- Scan the dialog struct broadly: try every 4-byte offset as both a char*
+    -- pointer and as an inline string start. The dialog items string is the
+    -- candidate with the most newlines. "mogus" must appear somewhere in the
+    -- scanned data to confirm this is the "Ar žmogus" captcha.
+    local function scanStr(addr, maxLen)
+        local s = readCString(addr, maxLen)
+        local n = 0
+        s:gsub("\n", function() n = n + 1 end)
+        return s, n
     end
 
-    local emptyIdx = nil
-    for i, item in ipairs(items) do
-        if item:match("^%s*$") then
-            emptyIdx = i - 1  -- 0-based index for key navigation
-        end
+    local bestText, bestNL, foundMogus = "", 0, false
+
+    for off = 0, 0x60, 4 do
+        local ptr = readMemory(dPtr + off, 4, false)
+        local s, n = scanStr(ptr, 4096)
+        if s:lower():find("mogus") then foundMogus = true end
+        if n > bestNL then bestText, bestNL = s, n end
+    end
+    for off = 0x2C, 0x300, 4 do
+        local s, n = scanStr(dPtr + off, 4096)
+        if s:lower():find("mogus") then foundMogus = true end
+        if n > bestNL then bestText, bestNL = s, n end
+    end
+
+    if not foundMogus or bestNL < 2 then return false end
+
+    local text = bestText:gsub("{%x%x%x%x%x%x}", "")
+    local items, emptyIdx = {}, nil
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        table.insert(items, line)
+        if line:match("^%s*$") then emptyIdx = #items - 1 end
     end
     if emptyIdx == nil then return false end
 
@@ -548,6 +548,21 @@ function main()
                             press_brake()
                             setGameKeyState(0, 0)
                             gasLevel = 0
+                        elseif frozenByAdmin then
+                            setGameKeyState(0, 0)
+                            gasLevel = 0; brakeLevel = 0
+                            writeMemory(0xB73458 + 0x20, 1, 0, false)
+                            writeMemory(0xB73458 + 0xC,  1, 0, false)
+                            if freezeTimer > 150 then
+                                local iv = 180
+                                if freezeTimer % iv == 0 then
+                                    if math.random(2) == 1 then
+                                        writeMemory(0xB73458 + 0x20, 1, math.random(60, 120), false)
+                                    else
+                                        setGameKeyState(0, math.random(2) == 1 and math.random(30, 60) or math.random(-60, -30))
+                                    end
+                                end
+                            end
                         else
                             local tX, tY, tZ = getSplineTarget(current_route, play_index)
 
