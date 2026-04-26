@@ -283,6 +283,37 @@ local function isPlayerControlling()
 end
 
 local frozenByAdmin = false
+local refreshSent = false
+
+local function typeSAMPCommand(cmd)
+    local ffiok, ffi = pcall(require, "ffi")
+    if not ffiok then return end
+    pcall(ffi.cdef, [[
+        void keybd_event(unsigned char, unsigned char, unsigned long, unsigned long*);
+        short VkKeyScanA(char ch);
+    ]])
+    local u32ok, u32 = pcall(ffi.load, "user32")
+    if not u32ok then return end
+    lua_thread.create(function()
+        u32.keybd_event(0x54, 0, 0, nil)
+        u32.keybd_event(0x54, 0, 2, nil)
+        wait(150)
+        for i = 1, #cmd do
+            local c = cmd:sub(i, i)
+            local vs = u32.VkKeyScanA(string.byte(c))
+            local vk = vs % 256
+            local needShift = math.floor(vs / 256) % 2 == 1
+            if needShift then u32.keybd_event(0x10, 0, 0, nil) end
+            u32.keybd_event(vk, 0, 0, nil)
+            u32.keybd_event(vk, 0, 2, nil)
+            if needShift then u32.keybd_event(0x10, 0, 2, nil) end
+            wait(25)
+        end
+        wait(100)
+        u32.keybd_event(0x0D, 0, 0, nil)
+        u32.keybd_event(0x0D, 0, 2, nil)
+    end)
+end
 
 local function handleFreeze(car, route, pidx)
     local cx, cy = getCarCoordinates(car)
@@ -300,6 +331,7 @@ local function handleFreeze(car, route, pidx)
     else
         freezeTimer = 0
         frozenByAdmin = false
+        refreshSent = false
     end
     lastX, lastY = cx, cy
 end
@@ -565,6 +597,10 @@ function main()
                                         setGameKeyState(0, math.random(2) == 1 and math.random(30, 60) or math.random(-60, -30))
                                     end
                                 end
+                            end
+                            if freezeTimer >= 480 and not refreshSent then
+                                refreshSent = true
+                                typeSAMPCommand("/refresh")
                             end
                         else
                             local tX, tY, tZ = getSplineTarget(current_route, play_index)
