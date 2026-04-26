@@ -31,6 +31,7 @@ end
 
 function main()
     wait(0)
+    _G.VR_TEST_ARBOTAS = false
     while true do
         wait(0)
 
@@ -39,6 +40,7 @@ function main()
                 active = false
                 botResult = nil
                 botRunning = false
+                _G.VR_TEST_ARBOTAS = false
             else
                 local nItems = math.random(8, 13)
                 local ePos   = math.random(3, nItems)
@@ -51,6 +53,7 @@ function main()
                 botResult  = nil
                 botRunning = true
                 active     = true
+                _G.VR_TEST_ARBOTAS = true
 
                 lua_thread.create(function()
                     wait(math.random(3000, 7000))
@@ -62,8 +65,9 @@ function main()
                     botResult  = lines[cursor] == ""
                     botRunning = false
                     wait(3000)
-                    active    = false
-                    botResult = nil
+                    active             = false
+                    botResult          = nil
+                    _G.VR_TEST_ARBOTAS = false
                 end)
             end
         end

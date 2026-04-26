@@ -50,6 +50,7 @@ local S = {
     routeObstacleDist = math.huge, routeAvoidDir = 0, routeObstacleTimer = 0,
     currentLateral = 0.0, nudgeOffset = 0.0, nudgeFrames = 0, nextNudge = 0,
     frozenByAdmin = false, refreshSent = false,
+    testArbotasPaused = false,
 }
 
 local LOOKAHEAD = 6
@@ -443,6 +444,21 @@ local function tryAnswerAntibotDialog(dPtr)
 end
 
 local function handleArbotas()
+    if _G.VR_TEST_ARBOTAS then
+        if not S.testArbotasPaused then
+            S.testArbotasPaused = true
+            paused = true
+            setGameKeyState(0, 0)
+            gasLevel = 0; brakeLevel = 0
+            writeMemory(0xB73458 + 0x20, 1, 0, false)
+            writeMemory(0xB73458 + 0xC,  1, 0, false)
+        end
+        return
+    end
+    if S.testArbotasPaused then
+        S.testArbotasPaused = false
+        paused = false
+    end
     if not playing or isCrashing or samp == 0 then return end
     local dPtr = readMemory(samp + 0x21A0B8, 4, true)
     if dPtr == 0 then arbotasHandled = false; return end
@@ -612,9 +628,9 @@ function main()
                             gasLevel = 0
                         elseif S.frozenByAdmin then
                             setGameKeyState(0, 0)
-                            gasLevel = 0; brakeLevel = 0
+                            gasLevel = 0; brakeLevel = 255
                             writeMemory(0xB73458 + 0x20, 1, 0, false)
-                            writeMemory(0xB73458 + 0xC,  1, 0, false)
+                            writeMemory(0xB73458 + 0xC,  1, 255, false)
                             if freezeTimer > 150 then
                                 local iv = 180
                                 if freezeTimer % iv == 0 then
