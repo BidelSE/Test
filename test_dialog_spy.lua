@@ -1,5 +1,5 @@
 script_name('test_dialog_spy')
-script_version('2.5')
+script_version('2.6')
 require 'lib.moonloader'
 
 -- Memory-only dialog debugger. No samp.* functions used.
@@ -118,67 +118,50 @@ local function scan()
     end
 
     local dPtr = rDword(samp + 0x21A0B8)
-    table.insert(out, string.format("dPtr=0x%08X", dPtr or 0))
-
     if not dPtr or dPtr == 0 then
-        table.insert(out, "dPtr is NULL — no dialog")
+        table.insert(out, "no dialog (dPtr=0)")
         return out, false
     end
 
-    -- shown flag
+    -- Sanity-check dPtr: must look like a typical heap address, not a small int
+    -- or a DLL address.  Avoids dereferencing garbage left in the pointer slot.
+    if dPtr < 0x01000000 or dPtr > 0x3FFFFFFF then
+        table.insert(out, string.format("dPtr=0x%08X (out of heap range, skipped)", dPtr))
+        return out, false
+    end
+
+    table.insert(out, string.format("dPtr=0x%08X", dPtr))
+
     local shown  = rDword(dPtr + 0x28)
     local isOpen = shown == 1
     table.insert(out, string.format("+0x28 shown=%d (%s)", shown or 0, isOpen and "OPEN" or "closed"))
 
-    -- confirmed offsets (from reverse-engineering session)
-    local dialogID   = rWord(dPtr + 0x04)   -- confirmed: dPtr+0x04 word = dialog ID
-    local dialogType = rByte(dPtr + 0x05)   -- confirmed: dPtr+0x05 byte = type (2=list)
+    local dialogID   = rWord(dPtr + 0x04)
+    local dialogType = rByte(dPtr + 0x05)
     table.insert(out, string.format("ID=%-5s  Type=%s (%s)",
         dialogID   and tostring(dialogID)   or "?",
         dialogType and tostring(dialogType) or "?",
         dialogType == 2 and "LIST" or dialogType == 1 and "INPUT" or
         dialogType == 0 and "MSGBOX" or "?"))
 
-    -- also show raw ID candidates for future reference
-    local w00 = rWord(dPtr + 0x00)
-    local d04 = rDword(dPtr + 0x04)
-    table.insert(out, string.format("  raw: +0x00w=%s  +0x04d=%s  samp+AC=%s",
-        w00 and tostring(w00) or "?",
-        d04 and tostring(d04) or "?",
-        tostring(rWord(samp + 0x21A0AC) or "?")))
-
-    -- ── items: confirmed pointer at dPtr+0x34 ────────────────────────────────
-    -- Walk all dwords 0x00..0xFC, prefer +0x34 (confirmed), fall back to best NL.
-    local bestBlob, bestNL, bestOff = nil, 0, nil
-
-    -- First: try the confirmed offset
+    -- ── items via confirmed pointer at dPtr+0x34 ─────────────────────────────
+    -- Only dereference +0x34 (confirmed offset).  No range scanning — following
+    -- random pointers from the struct caused unnecessary read attempts.
     local p34 = rDword(dPtr + 0x34)
-    if p34 and p34 > 0x10000 then
+    local blob, blobOff = nil, nil
+
+    if p34 and p34 >= 0x01000000 and p34 <= 0x3FFFFFFF then
         local s = rStr(p34, 4096)
         if s then
             local nl = 0; s:gsub("\n", function() nl = nl + 1 end)
-            if nl >= 1 then bestBlob, bestNL, bestOff = s, nl, 0x34 end
+            if nl >= 1 then blob, blobOff = s, 0x34 end
         end
     end
 
-    -- Also scan other pointers in first 0x60 bytes to find more candidates
-    for off = 0x28, 0x5C, 4 do
-        if off ~= 0x34 then   -- +0x34 already checked above
-            local ptr = rDword(dPtr + off)
-            if ptr and ptr >= 0x10000 and ptr < 0x7F000000 then
-                local s = rStr(ptr, 4096)
-                if s then
-                    local nl = 0; s:gsub("\n", function() nl = nl + 1 end)
-                    if nl > bestNL then bestBlob, bestNL, bestOff = s, nl, off end
-                end
-            end
-        end
-    end
-
-    if bestBlob and bestNL >= 1 then
-        table.insert(out, string.format("items ptr+0x%02X (%d lines)%s:",
-            bestOff, bestNL + 1, bestOff == 0x34 and " [confirmed]" or ""))
-        local items = parseItems(bestBlob)
+    if blob then
+        local nl = 0; blob:gsub("\n", function() nl = nl + 1 end)
+        table.insert(out, string.format("items @+0x34 ptr (%d lines):", nl + 1))
+        local items = parseItems(blob)
         local emptyIdx = nil
         for i, item in ipairs(items) do
             local idx = i - 1
@@ -196,12 +179,13 @@ local function scan()
             table.insert(out, "no empty row found in items")
         end
     else
-        table.insert(out, "items: no blob found")
+        local p34str = p34 and string.format("0x%08X", p34) or "nil"
+        table.insert(out, string.format("items: p34=%s no blob", p34str))
     end
 
-    -- hex dump: 6 rows × 4 dwords (96 bytes covers known offsets)
+    -- hex dump: first 4 rows (64 bytes) covering all confirmed offsets
     table.insert(out, "hex:")
-    for row = 0, 5 do
+    for row = 0, 3 do
         local hex = string.format(" +%02X:", row * 16)
         for col = 0, 3 do
             local v = rDword(dPtr + row * 16 + col * 4)
@@ -236,7 +220,11 @@ function main()
             tick = tick + 1
             if tick >= 3 then   -- poll every 3 frames to catch fast dialogs
                 tick  = 0
-                local newLines, wasOpen = scan()
+                local ok, newLines, wasOpen = pcall(scan)
+                if not ok then
+                    newLines = { "scan error: " .. tostring(newLines) }
+                    wasOpen  = false
+                end
                 if wasOpen then
                     lastOpenData = newLines
                     lastOpenTime = os.clock()
