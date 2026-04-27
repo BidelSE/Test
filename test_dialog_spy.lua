@@ -1,5 +1,5 @@
 script_name('test_dialog_spy')
-script_version('2.3')
+script_version('2.4')
 require 'lib.moonloader'
 
 -- Memory-only dialog debugger. No samp.* functions used.
@@ -9,11 +9,14 @@ require 'lib.moonloader'
 -- and mark the empty row with  <-- EMPTY (index N)  in green.
 -- That index is what you pass to sampSendDialogResponse.
 
-local samp  = 0
-local font  = nil
-local show  = false
-local lines = {}
-local tick  = 0
+local samp         = 0
+local font         = nil
+local show         = false
+local lines        = {}
+local tick         = 0
+local lastOpenData = {}    -- last scan where dialog was OPEN
+local lastOpenTime = 0     -- os.clock() when that scan ran
+local KEEP_SECS    = 8     -- keep showing data this long after dialog closes
 
 -- ── safe memory readers ───────────────────────────────────────────────────────
 
@@ -35,25 +38,25 @@ local function rDword(addr)
     return ok and v or nil
 end
 
--- read a null-terminated string; replaces non-printable bytes with '.'
+-- read a null-terminated string; replaces non-printable bytes with '?'
 -- also keeps newline (0x0A) as a real newline so we can split items later
+-- Uses rByte() for each character so each read has its own pcall — avoids
+-- the LuaJIT coroutine / pcall-closure crash that pcall(function()...end) causes.
 local function rStr(addr, maxLen)
     if not addr or addr < 0x10000 or addr > 0x7FFFFFFF then return nil end
     local s = ""
-    local ok = pcall(function()
-        for i = 0, (maxLen or 128) - 1 do
-            local b = readMemory(addr + i, 1, false)
-            if b == 0 then break end
-            if b == 0x0A then
-                s = s .. "\n"
-            elseif b >= 32 and b <= 126 then
-                s = s .. string.char(b)
-            elseif b > 126 then
-                s = s .. "?"
-            end
+    for i = 0, (maxLen or 128) - 1 do
+        local b = rByte(addr + i)
+        if b == nil or b == 0 then break end
+        if b == 0x0A then
+            s = s .. "\n"
+        elseif b >= 32 and b <= 126 then
+            s = s .. string.char(b)
+        elseif b > 126 then
+            s = s .. "?"
         end
-    end)
-    if not ok or #s < 1 then return nil end
+    end
+    if #s < 1 then return nil end
     return s
 end
 
@@ -94,115 +97,70 @@ local function scan()
 
     if samp == 0 then
         table.insert(out, "samp.dll not found")
-        return out
+        return out, false
     end
 
     local dPtr = rDword(samp + 0x21A0B8)
-    table.insert(out, string.format("samp+0x21A0B8 -> dPtr=0x%08X", dPtr or 0))
+    table.insert(out, string.format("dPtr=0x%08X", dPtr or 0))
 
     if not dPtr or dPtr == 0 then
         table.insert(out, "dPtr is NULL — no dialog")
-        return out
+        return out, false
     end
 
     -- shown flag
     local shown  = rDword(dPtr + 0x28)
     local isOpen = shown == 1
-    table.insert(out, string.format("+0x28 shown=%d  (%s)", shown or 0, isOpen and "OPEN" or "closed"))
+    table.insert(out, string.format("+0x28 shown=%d (%s)", shown or 0, isOpen and "OPEN" or "closed"))
 
-    -- dialog ID candidates
+    -- confirmed offsets (from reverse-engineering session)
+    local dialogID   = rWord(dPtr + 0x04)   -- confirmed: dPtr+0x04 word = dialog ID
+    local dialogType = rByte(dPtr + 0x05)   -- confirmed: dPtr+0x05 byte = type (2=list)
+    table.insert(out, string.format("ID=%-5s  Type=%s (%s)",
+        dialogID   and tostring(dialogID)   or "?",
+        dialogType and tostring(dialogType) or "?",
+        dialogType == 2 and "LIST" or dialogType == 1 and "INPUT" or
+        dialogType == 0 and "MSGBOX" or "?"))
+
+    -- also show raw ID candidates for future reference
     local w00 = rWord(dPtr + 0x00)
     local d04 = rDword(dPtr + 0x04)
-    local w04 = rWord(dPtr + 0x04)
-    local d24 = rDword(dPtr + 0x24)
-    local dAC = rWord(samp + 0x21A0AC)
-    table.insert(out, string.format(
-        "ID? +0x00w=%-5s +0x04d=%-6s +0x04w=%-5s +0x24=%-5s",
-        w00  and tostring(w00)  or "?",
-        d04  and tostring(d04)  or "?",
-        w04  and tostring(w04)  or "?",
-        d24  and tostring(d24)  or "?"))
-    table.insert(out, string.format("    samp+0x21A0AC(w)=%-5s",
-        dAC and tostring(dAC) or "?"))
+    table.insert(out, string.format("  raw: +0x00w=%s  +0x04d=%s  samp+AC=%s",
+        w00 and tostring(w00) or "?",
+        d04 and tostring(d04) or "?",
+        tostring(rWord(samp + 0x21A0AC) or "?")))
 
-    -- type byte candidates (+0x02, +0x03, +0x05, +0x06)
-    local b02 = rByte(dPtr + 0x02)
-    local b03 = rByte(dPtr + 0x03)
-    local b05 = rByte(dPtr + 0x05)
-    local b06 = rByte(dPtr + 0x06)
-    table.insert(out, string.format("Type? b02=%s b03=%s b05=%s b06=%s",
-        b02 and tostring(b02) or "?",
-        b03 and tostring(b03) or "?",
-        b05 and tostring(b05) or "?",
-        b06 and tostring(b06) or "?"))
+    -- ── items: confirmed pointer at dPtr+0x34 ────────────────────────────────
+    -- Walk all dwords 0x00..0xFC, prefer +0x34 (confirmed), fall back to best NL.
+    local bestBlob, bestNL, bestOff = nil, 0, nil
 
-    -- ── pointer-follow scan ───────────────────────────────────────────────────
-    -- Walk every dword in the first 0x100 bytes. For each valid pointer, read
-    -- the memory it points to and look for title strings or items blobs.
-    table.insert(out, "-- ptr follow --")
-    local ptrBest, ptrBestNL, ptrBestOff = nil, 0, nil
-    local ptrTitles = {}
+    -- First: try the confirmed offset
+    local p34 = rDword(dPtr + 0x34)
+    if p34 and p34 > 0x10000 then
+        local s = rStr(p34, 4096)
+        if s then
+            local nl = 0; s:gsub("\n", function() nl = nl + 1 end)
+            if nl >= 1 then bestBlob, bestNL, bestOff = s, nl, 0x34 end
+        end
+    end
 
-    for off = 0, 0xFC, 4 do
+    -- Also scan other pointers in first 0x60 bytes to find more candidates
+    for off = 0x28, 0x5C, 4 do
+        if off == 0x34 then goto continue end  -- already done
         local ptr = rDword(dPtr + off)
         if ptr and ptr >= 0x10000 and ptr < 0x7F000000 then
             local s = rStr(ptr, 4096)
-            if s and #s >= 4 then
-                local nl = 0; s:gsub("\n", function() nl = nl + 1 end)
-                if nl >= 2 then
-                    -- candidate items blob — keep the one with the most newlines
-                    if nl > ptrBestNL then
-                        ptrBest, ptrBestNL, ptrBestOff = s, nl, off
-                    end
-                elseif #s >= 4 and #s <= 80 then
-                    -- candidate title
-                    local preview = s:sub(1, 48)
-                    table.insert(ptrTitles, string.format(
-                        "  +0x%02X->title: '%s'", off, preview))
-                end
-            end
-        end
-    end
-
-    for _, t in ipairs(ptrTitles) do
-        table.insert(out, t)
-    end
-
-    -- ── item list display ─────────────────────────────────────────────────────
-    -- Prefer pointer-follow result; fall back to old fixed-offset scan.
-    local bestBlob, bestNL, bestLabel = nil, 0, nil
-
-    if ptrBest then
-        bestBlob  = ptrBest
-        bestNL    = ptrBestNL
-        bestLabel = string.format("items via ptr +0x%02X (%d lines):", ptrBestOff, ptrBestNL + 1)
-    else
-        -- legacy fixed-offset scan
-        local itemOffsets = {0x4C, 0x48, 0x50, 0x54, 0x108, 0x10C}
-        local bestIsPtr, bestOff = false, nil
-        for _, off in ipairs(itemOffsets) do
-            local s = rStr(dPtr + off, 2048)
             if s then
                 local nl = 0; s:gsub("\n", function() nl = nl + 1 end)
-                if nl > bestNL then bestBlob, bestNL, bestOff, bestIsPtr = s, nl, off, false end
-            end
-            local ptr = rDword(dPtr + off)
-            if ptr and ptr > 0x10000 then
-                s = rStr(ptr, 2048)
-                if s then
-                    local nl = 0; s:gsub("\n", function() nl = nl + 1 end)
-                    if nl > bestNL then bestBlob, bestNL, bestOff, bestIsPtr = s, nl, off, true end
-                end
+                if nl > bestNL then bestBlob, bestNL, bestOff = s, nl, off end
             end
         end
-        if bestBlob and bestNL >= 1 then
-            bestLabel = string.format("items @ +0x%02X %s(%d lines):",
-                bestOff, bestIsPtr and "(ptr) " or "", bestNL + 1)
-        end
+        ::continue::
     end
 
     if bestBlob and bestNL >= 1 then
-        table.insert(out, bestLabel)
+        table.insert(out, string.format("items ptr+0x%02X (%d lines)%s:",
+            bestOff, bestNL + 1, bestOff == 0x34 and " [confirmed]" or ""))
         local items = parseItems(bestBlob)
         local emptyIdx = nil
         for i, item in ipairs(items) do
@@ -221,12 +179,12 @@ local function scan()
             table.insert(out, "no empty row found in items")
         end
     else
-        table.insert(out, "items blob not found (no newlines at any ptr)")
+        table.insert(out, "items: no blob found")
     end
 
-    -- hex dump: 8 rows × 4 dwords (128 bytes)
+    -- hex dump: 6 rows × 4 dwords (96 bytes covers known offsets)
     table.insert(out, "hex:")
-    for row = 0, 7 do
+    for row = 0, 5 do
         local hex = string.format(" +%02X:", row * 16)
         for col = 0, 3 do
             local v = rDword(dPtr + row * 16 + col * 4)
@@ -235,7 +193,7 @@ local function scan()
         table.insert(out, hex)
     end
 
-    return out
+    return out, isOpen
 end
 
 -- ── render loop ───────────────────────────────────────────────────────────────
@@ -249,6 +207,7 @@ function main()
         if isKeyDown(0x11) and isKeyJustPressed(VK_F9) then
             show  = not show
             lines = {}
+            lastOpenData = {}
             printStringNow(show and "~g~Dialog debug ON" or "~r~Dialog debug OFF", 1500)
         end
 
@@ -258,9 +217,24 @@ function main()
 
         if show then
             tick = tick + 1
-            if tick >= 15 then
+            if tick >= 3 then   -- poll every 3 frames to catch fast dialogs
                 tick  = 0
-                lines = scan()
+                local newLines, wasOpen = scan()
+                if wasOpen then
+                    lastOpenData = newLines
+                    lastOpenTime = os.clock()
+                end
+                -- show live data if dialog is open, otherwise show last-open data
+                -- for KEEP_SECS seconds so fast dialogs can be read after they close
+                if wasOpen then
+                    lines = newLines
+                elseif os.clock() - lastOpenTime < KEEP_SECS and #lastOpenData > 0 then
+                    lines = lastOpenData
+                    lines[1] = lines[1] .. string.format(
+                        "  [closed %.0fs ago]", os.clock() - lastOpenTime)
+                else
+                    lines = newLines
+                end
             end
 
             if font and #lines > 0 then
@@ -270,17 +244,14 @@ function main()
                 renderFontDrawText(font, "DIALOG DEBUG  Ctrl+F9", x, y, 0xFF88CCFF)
                 for i, l in ipairs(lines) do
                     local col =
-                        l:find("EMPTY")        and 0xFF44FF44  or
-                        l:find(">>> send")      and 0xFF00FF00  or
+                        l:find("<-- EMPTY")    and 0xFF44FF44  or
+                        l:find(">>> send")     and 0xFF00FF00  or
                         l:find("OPEN")         and 0xFF44FF44  or
-                        l:find("->title")      and 0xFFFFFF44  or
-                        l:find("items via ptr") and 0xFFFFAA00  or
-                        l:find("items @")      and 0xFFFFAA00  or
+                        l:find("closed")       and 0xFFFF8844  or
+                        l:find("items ptr")    and 0xFFFFAA00  or
                         l:find("^  %[")        and 0xFFCCCCFF  or
-                        l:find("^ID%?")        and 0xFF88FF88  or
-                        l:find("^    samp")    and 0xFF88FF88  or
-                        l:find("^Type%?")      and 0xFF88FF88  or
-                        l:find("^%-%- ptr")    and 0xFF555566  or
+                        l:find("^ID=")         and 0xFF88FF88  or
+                        l:find("^  raw:")      and 0xFF558855  or
                         l:find("hex:")         and 0xFF888888  or
                         l:find("^ %+")         and 0xFF888888  or
                         0xFFCCCCCC
