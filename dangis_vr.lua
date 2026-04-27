@@ -1,5 +1,5 @@
 script_name('dangis_vr')
-script_version('5.9')
+script_version('5.10')
 require 'lib.moonloader'
 
 local recording = false
@@ -675,95 +675,105 @@ local function findEmptyDialogRowMoves(text)
 end
 
 local function tryAnswerAntibotDialog(dPtr)
-    do return false end
     local ffiok, ffi = pcall(require, "ffi")
     if not ffiok then return false end
 
-    local isArbotas, bestText = looksLikeArbotasDialog(dPtr)
-    local downMoves = nil
-    if isArbotas then
-        downMoves = findEmptyDialogRowMoves(bestText)
+    -- Safe memory reads via FFI + IsBadReadPtr (readMemory crashes the
+    -- LuaJIT coroutine on bad memory; FFI + IsBadReadPtr is safe).
+    pcall(ffi.cdef, [[
+        int  IsBadReadPtr(const void* lp, unsigned int n);
+        void keybd_event(unsigned char vk, unsigned char scan,
+                         unsigned long flags, unsigned long* extra);
+    ]])
+    local k32ok, k32 = pcall(ffi.load, "kernel32")
+    if not k32ok then return false end
+
+    local function rd(addr, n)
+        if not addr or addr < 0x01000000 or addr > 0x3FFFFFFF then return false end
+        return k32.IsBadReadPtr(ffi.cast("void*", addr), n) == 0
     end
-    if downMoves == nil then return false end
+    local function rDword(addr)
+        if not rd(addr, 4) then return nil end
+        return tonumber(ffi.cast("uint32_t*", addr)[0])
+    end
+    local function rWord(addr)
+        if not rd(addr, 2) then return nil end
+        return tonumber(ffi.cast("uint16_t*", addr)[0])
+    end
+    local function rByte(addr)
+        if not rd(addr, 1) then return nil end
+        return tonumber(ffi.cast("uint8_t*", addr)[0])
+    end
+    local function rStr(addr, maxLen)
+        if not rd(addr, 1) then return nil end
+        local s, page = "", math.floor(addr / 4096)
+        for i = 0, (maxLen or 2048) - 1 do
+            local cur = addr + i
+            local p   = math.floor(cur / 4096)
+            if p ~= page then
+                if k32.IsBadReadPtr(ffi.cast("void*", cur), 1) ~= 0 then break end
+                page = p
+            end
+            local b = tonumber(ffi.cast("uint8_t*", cur)[0])
+            if b == 0 then break end
+            if b == 0x0A then s = s .. "\n"
+            elseif b >= 32 and b <= 126 then s = s .. string.char(b)
+            elseif b > 126 then s = s .. "?"
+            end
+        end
+        return #s > 0 and s or nil
+    end
 
-    _G.VR_DIALOG_TITLE = "Ar zmogus"
-    _G.VR_DIALOG_EMPTY_MOVES = downMoves
+    -- ── read dialog state via confirmed offsets ───────────────────────────────
+    if rDword(dPtr + 0x28) ~= 1 then return false end  -- not shown
+    if rByte(dPtr + 0x05)  ~= 2 then return false end  -- not a list dialog
+    local dialogID = rWord(dPtr + 0x04)
+    if not dialogID then return false end
 
-    pcall(ffi.cdef, [[void keybd_event(unsigned char, unsigned char, unsigned long, unsigned long*);]])
+    local itemsPtr = rDword(dPtr + 0x34)
+    if not itemsPtr then return false end
+
+    local blob = rStr(itemsPtr, 4096)
+    if not blob then return false end
+
+    -- Find the first empty row (0-based index) — that is the captcha answer
+    local emptyIdx = nil
+    local idx = 0
+    for line in (blob .. "\n"):gmatch("([^\n]*)\n") do
+        line = line:gsub("{%x%x%x%x%x%x}", ""):match("^%s*(.-)%s*$")
+        if line == "" then emptyIdx = idx; break end
+        idx = idx + 1
+    end
+    if emptyIdx == nil then return false end
+
+    _G.VR_DIALOG_TITLE       = "Ar zmogus"
+    _G.VR_DIALOG_EMPTY_MOVES = emptyIdx
+
+    -- ── send response ─────────────────────────────────────────────────────────
+    -- Primary: samp.* Lua API (unavailable in VMware but works on bare metal)
+    if type(sampSendDialogResponse) == "function" then
+        sampSendDialogResponse(dialogID, 1, emptyIdx, "")
+        return true
+    end
+
+    -- Fallback: keyboard navigation — press VK_DOWN emptyIdx times + VK_RETURN
     local u32ok, u32 = pcall(ffi.load, "user32")
     if not u32ok then return false end
 
     lua_thread.create(function()
         wait(400)
         wait(math.random(3000, 7000))
-        for _ = 1, downMoves do
-            u32.keybd_event(0x28, 0, 0, nil)
-            u32.keybd_event(0x28, 0, 2, nil)
+        for _ = 1, emptyIdx do
+            u32.keybd_event(0x28, 0, 0, nil)   -- VK_DOWN down
+            u32.keybd_event(0x28, 0, 2, nil)   -- VK_DOWN up
             wait(math.random(40, 90))
         end
         wait(math.random(300, 800))
-        u32.keybd_event(0x0D, 0, 0, nil)
-        u32.keybd_event(0x0D, 0, 2, nil)
+        u32.keybd_event(0x0D, 0, 0, nil)   -- VK_RETURN down
+        u32.keybd_event(0x0D, 0, 2, nil)   -- VK_RETURN up
     end)
 
     return true
-
---[=[
-
-    -- Scan the dialog struct broadly: try every 4-byte offset as both a char*
-    -- pointer and as an inline string start. The dialog items string is the
-    -- candidate with the most newlines. "mogus" must appear somewhere in the
-    -- scanned data to confirm this is the "Ar žmogus" captcha.
-    local function scanStr(addr, maxLen)
-        local s = readCString(addr, maxLen)
-        local n = 0
-        s:gsub("\n", function() n = n + 1 end)
-        return s, n
-    end
-
-    local bestText, bestNL, foundMogus = "", 0, false
-
-    for off = 0, 0x60, 4 do
-        local ptr = readMemory(dPtr + off, 4, false)
-        local s, n = scanStr(ptr, 4096)
-        if s:lower():find("mogus") then foundMogus = true end
-        if n > bestNL then bestText, bestNL = s, n end
-    end
-    for off = 0x2C, 0x300, 4 do
-        local s, n = scanStr(dPtr + off, 4096)
-        if s:lower():find("mogus") then foundMogus = true end
-        if n > bestNL then bestText, bestNL = s, n end
-    end
-
-    if not foundMogus or bestNL < 2 then return false end
-
-    local text = bestText:gsub("{%x%x%x%x%x%x}", "")
-    local items, emptyIdx = {}, nil
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-        table.insert(items, line)
-        if line:match("^%s*$") then emptyIdx = #items - 1 end
-    end
-    if emptyIdx == nil then return false end
-
-    pcall(ffi.cdef, [[void keybd_event(unsigned char, unsigned char, unsigned long, unsigned long*);]])
-    local u32ok, u32 = pcall(ffi.load, "user32")
-    if not u32ok then return false end
-
-    lua_thread.create(function()
-        wait(400)                           -- let dialog fully render
-        wait(math.random(3000, 7000))       -- human thinking delay
-        for _ = 1, emptyIdx do
-            u32.keybd_event(0x28, 0, 0, nil)
-            u32.keybd_event(0x28, 0, 2, nil)
-            wait(math.random(40, 90))       -- human-speed scrolling
-        end
-        wait(math.random(300, 800))         -- pause before confirming
-        u32.keybd_event(0x0D, 0, 0, nil)
-        u32.keybd_event(0x0D, 0, 2, nil)
-    end)
-
-    return true
-]=]
 end
 
 local function handleArbotas()
@@ -807,35 +817,11 @@ local function handleArbotas()
     S.dialogPaused = true
     syncPausedState()
     releaseControls("DIALOG")
-    return
 
---[=[
-    if tryAnswerAntibotDialog(dPtr) then
-        lua_thread.create(function()
-            -- Wait up to 15s for the answer + dialog close
-            for _ = 1, 150 do
-                wait(100)
-                local dp = readMemory(samp + 0x21A0B8, 4, true)
-                if dp == 0 or readMemory(dp + 0x28, 4, true) ~= 1 then
-                    arbotasHandled = false
-                    S.dialogPaused = false
-                    paused = false
-                    pauseReleaseReason = ""
-                    return
-                end
-            end
-            -- Dialog still open after 6s — give up and crash
-            isCrashing = true
-            doForceCrash()
-        end)
-    else
-        isCrashing = true
-        lua_thread.create(function()
-            wait(math.random(2000, 8000))
-            doForceCrash()
-        end)
-    end
-]=]
+    -- Auto-respond: tryAnswerAntibotDialog uses confirmed memory offsets to
+    -- find the empty row and either calls sampSendDialogResponse (bare metal)
+    -- or schedules VK_DOWN × N + VK_RETURN keyboard navigation (VMware).
+    tryAnswerAntibotDialog(dPtr)
 end
 
 function main()
@@ -844,7 +830,7 @@ function main()
     if not doesDirectoryExist(paths_dir) then createDirectory(paths_dir) end
     samp = getModuleHandle("samp.dll")
     writeSharedState("IDLE")
-    printStringNow("~g~Dangis VR v5.8 ikelta!", 3000)
+    printStringNow("~g~Dangis VR v5.10 ikelta!", 3000)
     printStringNow("~w~F2-Irasyti F10-Paleisti F11-Kartoti F6-Pauze F7-Sustabdyti", 5000)
 
     lua_thread.create(function()
