@@ -1,5 +1,5 @@
 script_name('dangis_vr')
-script_version('5.8')
+script_version('5.9')
 require 'lib.moonloader'
 
 local recording = false
@@ -380,17 +380,17 @@ local function showMsg(text)
 end
 
 local function applySteerNoise()
+    -- Keyboard players only ever send 0 or ±128; intermediate values flag as analog.
+    -- "Noise" here means briefly releasing the key (outputting 0) for 1-3 frames.
     if steerNoiseDuration > 0 then
         steerNoiseDuration = steerNoiseDuration - 1
-        setGameKeyState(0, math.max(-128, math.min(128, lastSteerValue + steerNoiseValue)))
+        setGameKeyState(0, 0)
     elseif steerNoiseCooldown > 0 then
         steerNoiseCooldown = steerNoiseCooldown - 1
     elseif math.random(100) <= 10 then
-        local range = (lastSteerValue == 0) and 25 or 40
-        steerNoiseValue = math.random(-range, range)
-        steerNoiseDuration = math.random(2, 6)
+        steerNoiseDuration = math.random(1, 3)
         steerNoiseCooldown = math.random(8, 30)
-        setGameKeyState(0, math.max(-128, math.min(128, lastSteerValue + steerNoiseValue)))
+        setGameKeyState(0, 0)
     end
 end
 
@@ -1014,9 +1014,8 @@ function main()
                             if sharpTurnAhead(current_route, play_index) and currentSpeed > targetSpeed * 0.7 then
                                 turning_mechanism(tX, tY, carX, carY, car)
                                 applySteerNoise()
-                                local excess = math.max(0, currentSpeed - targetSpeed * 0.7)
-                                brakeLevel = math.min(255, math.floor(excess * 30))
-                                gasLevel = math.max(0, gasLevel - 25)
+                                brakeLevel = 255
+                                gasLevel = 0
                                 writeMemory(0xB73458 + 0x20, 1, gasLevel, false)
                                 writeMemory(0xB73458 + 0xC, 1, brakeLevel, false)
                             else
@@ -1031,14 +1030,13 @@ function main()
                                     S.nextGasLift = os.clock() + math.random(20, 60)
                                 else
                                     if currentSpeed < targetSpeed then
-                                        gasLevel = math.min(255, gasLevel + 18)
-                                        brakeLevel = math.max(0, brakeLevel - 50)
+                                        gasLevel = 255
+                                        brakeLevel = 0
                                     elseif currentSpeed < targetSpeed + 1.5 then
-                                        brakeLevel = math.max(0, brakeLevel - 50)
+                                        brakeLevel = 0
                                     else
-                                        local excess = currentSpeed - (targetSpeed + 1.5)
-                                        brakeLevel = math.min(255, math.floor(excess * 30))
-                                        gasLevel = math.max(0, gasLevel - 25)
+                                        brakeLevel = 255
+                                        gasLevel = 0
                                     end
                                 end
                                 writeMemory(0xB73458 + 0x20, 1, gasLevel, false)
