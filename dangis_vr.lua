@@ -1,5 +1,5 @@
 script_name('dangis_vr')
-script_version('5.7')
+script_version('5.8')
 require 'lib.moonloader'
 
 local recording = false
@@ -24,8 +24,6 @@ local lastSteerValue = 0
 local steerNoiseValue = 0
 local steerNoiseDuration = 0
 local steerNoiseCooldown = 0
-local collisionCooldown = 0
-local avoidSteerDir = 0
 local overrideActive = false
 
 local lastX, lastY = 0.0, 0.0
@@ -54,10 +52,6 @@ local arbotasHandled = false
 local S = {
     gasLiftFrames = 0, nextGasLift = 0,
     lapWander = 0.0, lapCount = 0, nextBreakTime = 0, autoPaused = false,
-    routeObstacleDist = math.huge, routeAvoidDir = 0, routeObstacleTimer = 0,
-    routeObstacleUrgency = 0.0,
-    avoidRouteDir = 0,
-    showObstacleDots = true, obstacleDebugMode = 2, obstacleFont = nil, obstacleHits = {}, obstacleProbes = {},
     currentLateral = 0.0, nudgeOffset = 0.0, nudgeFrames = 0, nextNudge = 0,
     manualPaused = false,
     frozenByAdmin = false, refreshSent = false, refreshTarget = 300,
@@ -315,15 +309,6 @@ local function resetFreezeRecovery()
     S.currentLateral = 0.0
     S.nudgeFrames = 0
     S.nudgeOffset = 0.0
-    S.routeObstacleDist = math.huge
-    S.routeAvoidDir = 0
-    S.routeObstacleUrgency = 0.0
-    S.routeObstacleTimer = 0
-    S.obstacleHits = {}
-    S.obstacleProbes = {}
-    collisionCooldown = 0
-    avoidSteerDir = 0
-    S.avoidRouteDir = 0
     reverseTimer = 0
     gasLevel = 0
     brakeLevel = 0
@@ -379,43 +364,6 @@ local function pressFreezeConfused(now)
     writeSharedState(pauseReleaseReason)
 end
 
-local function obstacleColor(kind, urgent, sideScan)
-    if urgent then return 0xFFFF4444 end
-    if kind == "car" then return sideScan and 0xFFFFCC55 or 0xFFFFAA33 end
-    if kind == "solid" then return sideScan and 0xFFFFFF99 or 0xFFFFFF55 end
-    if kind == "ped" then return 0xFFFF66FF end
-    return sideScan and 0xFF66FFFF or 0xFF33DDFF
-end
-
-local function obstacleTag(kind)
-    if kind == "car" then return "C" end
-    if kind == "solid" then return "W" end
-    if kind == "ped" then return "P" end
-    if kind == "obj" then return "O" end
-    return "?"
-end
-
-local function clamp01(value)
-    if value < 0.0 then return 0.0 end
-    if value > 1.0 then return 1.0 end
-    return value
-end
-
-local function obstacleUrgency(hit)
-    if not hit then return 0.0 end
-    local worldDist = hit.worldDist or 999.0
-    local lateral = hit.lateral or 99.0
-    if hit.sideScan then
-        local near = clamp01((18.0 - worldDist) / 13.0)
-        local scrape = clamp01((3.8 - lateral) / 3.8)
-        return clamp01(near * (0.35 + scrape * 0.65))
-    end
-
-    local near = clamp01((42.0 - worldDist) / 36.0)
-    local center = clamp01((2.8 - lateral) / 2.8)
-    return clamp01(near * (0.25 + center * 0.75))
-end
-
 local function draw_line(posX, posY, carX, carY, carZ)
     local chPosX, chPosY, chPosZ = getCharCoordinates(PLAYER_PED)
     if isPointOnScreen(posX, posY, chPosZ, 0.0) then
@@ -424,69 +372,6 @@ local function draw_line(posX, posY, carX, carY, carZ)
         renderDrawLine(wPosX1, wPosY1, wPosX, wPosY, 2, 0xFFFF0000)
         renderDrawPolygon(wPosX, wPosY, 10, 10, 14, 0.0, 0xFF000000)
         renderDrawPolygon(wPosX1, wPosY1, 10, 10, 14, 0.0, 0xFF000000)
-    end
-    if not S.showObstacleDots or (S.obstacleDebugMode or 0) <= 0 then return end
-    if not S.obstacleFont then
-        S.obstacleFont = renderCreateFont("Arial", 9, 1)
-    end
-
-    carX = carX or chPosX
-    carY = carY or chPosY
-    carZ = carZ or chPosZ
-
-    local debugMode = S.obstacleDebugMode or 1
-    for i = 1, math.min(#S.obstacleProbes, debugMode >= 2 and 90 or 48) do
-        local probe = S.obstacleProbes[i]
-        local pz = probe.z or carZ
-        if getDistanceBetweenCoords2d(carX, carY, probe.x, probe.y) < 160 and isPointOnScreen(probe.x, probe.y, pz, 0.0) then
-            local psx, psy = convert3DCoordsToScreen(probe.x, probe.y, pz)
-            if debugMode >= 2 and probe.fromX and isPointOnScreen(probe.fromX, probe.fromY, probe.fromZ or pz, 0.0) then
-                local fsx, fsy = convert3DCoordsToScreen(probe.fromX, probe.fromY, probe.fromZ or pz)
-                local probeColor = probe.hit
-                    and obstacleColor(probe.kind or "obj", false, probe.sideScan == true)
-                    or (probe.sideScan and 0x8855DDFF or 0x8855FF55)
-                renderDrawLine(fsx, fsy, psx, psy, probe.hit and 1.2 or 0.8, probeColor)
-            end
-            local dotColor = probe.hit
-                and obstacleColor(probe.kind or "obj", false, probe.sideScan == true)
-                or (probe.sideScan and 0xAA55DDFF or 0xAA55FF55)
-            renderDrawPolygon(psx, psy, probe.hit and 5 or 3, probe.hit and 5 or 3, 10, 0.0, dotColor)
-        end
-    end
-
-    if #S.obstacleHits == 0 then return end
-
-    local best = S.obstacleHits[1]
-    if best and getDistanceBetweenCoords2d(carX, carY, best.x, best.y) < 140 and isPointOnScreen(best.x, best.y, best.z or carZ, 0.0) then
-        local sx, sy = convert3DCoordsToScreen(best.x, best.y, best.z or chPosZ)
-        local csx, csy = convert3DCoordsToScreen(chPosX, chPosY, chPosZ)
-        renderDrawLine(csx, csy, sx, sy, 1.6, 0xFFFF66FF)
-        if S.obstacleFont then
-            renderFontDrawText(S.obstacleFont, "OBS", sx + 6, sy + 8, 0xFFFFAAFF)
-        end
-    end
-
-    for i = 1, math.min(#S.obstacleHits, 18) do
-        local hit = S.obstacleHits[i]
-        local hz = hit.z or carZ
-        if getDistanceBetweenCoords2d(carX, carY, hit.x, hit.y) < 140 and isPointOnScreen(hit.x, hit.y, hz, 0.0) then
-            local sx, sy = convert3DCoordsToScreen(hit.x, hit.y, hz)
-            local urgent = hit.worldDist < 18 or hit.lateral < 2.2
-            local color = obstacleColor(hit.kind, urgent, hit.sideScan == true)
-            local size = urgent and 9 or 6
-            renderDrawPolygon(sx, sy, size, size, 14, 0.0, color)
-            local sideText = hit.cross > 0 and "L" or "R"
-            renderFontDrawText(S.obstacleFont, string.format("%s %d %s", obstacleTag(hit.kind), math.floor(hit.worldDist), sideText), sx + 8, sy - 6, color)
-        end
-    end
-
-    if debugMode >= 2 and best then
-        local bx, by = 230, 420
-        local sideText = best.cross > 0 and "LEFT" or "RIGHT"
-        local sourceText = best.sideScan and "SIDE" or "PATH"
-        renderDrawBox(bx, by, 190, 36, 0xAA000000)
-        renderFontDrawText(S.obstacleFont, string.format("OBS %s %dm %s", obstacleTag(best.kind), math.floor(best.worldDist), sideText), bx + 6, by + 4, 0xFFFFFFFF)
-        renderFontDrawText(S.obstacleFont, string.format("%s u%.2f lat %.1f", sourceText, best.urgency or obstacleUrgency(best), best.lateral or 0.0), bx + 6, by + 18, 0xFFCCCCCC)
     end
 end
 
@@ -509,406 +394,6 @@ local function applySteerNoise()
     end
 end
 
-local function getObstacleAhead(car, targetX, targetY)
-    local fallbackHit = nil
-    for i = 1, math.min(#S.obstacleHits, 8) do
-        local hit = S.obstacleHits[i]
-        local sideScan = hit.sideScan == true
-        local maxDist = sideScan and 12 or 28
-        local maxLateral = sideScan and 3.4 or 3.0
-        local urgency = hit.urgency or obstacleUrgency(hit)
-        local minUrgency = sideScan and 0.52 or 0.38
-        if urgency >= minUrgency and hit.worldDist < maxDist and hit.lateral < maxLateral and (not hit.zDelta or hit.zDelta < 2.2) then
-            if hit.avoidDir and hit.avoidDir ~= 0 then
-                return hit.x, hit.y, hit.z or 0, hit.avoidDir or 0, hit.worldDist
-            elseif not fallbackHit then
-                fallbackHit = hit
-            end
-        end
-    end
-    if fallbackHit then
-        return fallbackHit.x, fallbackHit.y, fallbackHit.z or 0, fallbackHit.avoidDir or 0, fallbackHit.worldDist
-    end
-
-    local carX, carY, carZ = getCarCoordinates(car)
-    local dx = targetX - carX
-    local dy = targetY - carY
-    local d = math.sqrt(dx * dx + dy * dy)
-    if d < 0.1 then return nil end
-    local nx, ny = dx / d, dy / d
-    for _, chkDist in ipairs({5, 8}) do
-        local okC, nearC = pcall(getClosestCar, carX + nx * chkDist, carY + ny * chkDist, carZ, 5.0, {}, 0)
-        if okC and nearC and nearC ~= 0 and nearC ~= car then
-            local ox, oy = getCarCoordinates(nearC)
-            local od = getDistanceBetweenCoords2d(carX, carY, ox, oy)
-            if od < chkDist + 4 then
-                return ox, oy, carZ, avoidDir(car, ox, oy, targetX, targetY), od
-            end
-        end
-    end
-    local checkX = carX + nx * 12
-    local checkY = carY + ny * 12
-    local ok1, nearest = pcall(getClosestCar, checkX, checkY, carZ, 5.0, {}, 0)
-    if ok1 and nearest and nearest ~= 0 and nearest ~= car then
-        local ox, oy = getCarCoordinates(nearest)
-        return ox, oy, carZ, 0, getDistanceBetweenCoords2d(carX, carY, ox, oy)
-    end
-    local ok2, nearObj = pcall(getClosestObject, checkX, checkY, carZ, 4.0, false, false)
-    if ok2 and nearObj and nearObj ~= 0 then
-        local ok3, ox, oy = pcall(getObjectCoordinates, nearObj)
-        if ok3 and ox then return ox, oy, carZ, 0, getDistanceBetweenCoords2d(carX, carY, ox, oy) end
-    end
-    return nil
-end
-
-local function avoidDir(car, obsX, obsY, targetX, targetY)
-    local carX, carY = getCarCoordinates(car)
-    local dx = targetX - carX
-    local dy = targetY - carY
-    local d = math.sqrt(dx * dx + dy * dy)
-    if d < 0.1 then return 128 end
-    local nx, ny = dx / d, dy / d
-    local dot = (obsX - carX) * ny + (obsY - carY) * (-nx)
-    return dot > 0 and -128 or 128
-end
-
-function routeAvoidDirFromPoint(carX, carY, targetX, targetY, obsX, obsY)
-    local dx = targetX - carX
-    local dy = targetY - carY
-    local d = math.sqrt(dx * dx + dy * dy)
-    if d < 0.1 then return 0 end
-    local cross = dx * (obsY - carY) - dy * (obsX - carX)
-    return cross > 0 and -1 or 1
-end
-
-local function sharpTurnAhead(route, idx)
-    local n = #route
-    for i = idx, math.min(idx + LOOKAHEAD, n - 1) do
-        local ax = route[i].x - route[math.max(1, i-1)].x
-        local ay = route[i].y - route[math.max(1, i-1)].y
-        local bx = route[math.min(n, i+1)].x - route[i].x
-        local by = route[math.min(n, i+1)].y - route[i].y
-        local da = math.sqrt(ax*ax + ay*ay)
-        local db = math.sqrt(bx*bx + by*by)
-        if da > 0.1 and db > 0.1 then
-            local dot = (ax/da)*(bx/db) + (ay/da)*(by/db)
-            if dot < -0.3 then return true end
-        end
-    end
-    return false
-end
-
-local function getCarForwardAxes(car)
-    local heading = math.rad(getCarHeading(car))
-    local nx = math.sin(heading)
-    local ny = math.cos(heading)
-    local len = math.sqrt(nx * nx + ny * ny)
-    if len < 0.1 then return 0.0, 1.0, -1.0, 0.0 end
-    nx, ny = nx / len, ny / len
-    return nx, ny, -ny, nx
-end
-
-local function scanRouteAhead(route, idx, car)
-    local n = #route
-    local carX, carY, carZ = getCarCoordinates(car)
-    local carForwardX, carForwardY, carLeftX, carLeftY = getCarForwardAxes(car)
-    S.obstacleHits = {}
-    S.obstacleProbes = {}
-    local best = math.huge
-    local bestDir = 0
-    local bestThreat = math.huge
-    local found = {}
-    local originZ = carZ + 0.75
-
-    local function lateralFromSegment(ax, ay, bx, by, px, py)
-        local rx = bx - ax
-        local ry = by - ay
-        local rLen = math.sqrt(rx*rx + ry*ry)
-        if rLen < 0.1 then return 99, 0 end
-        local cross = rx * (py - ay) - ry * (px - ax)
-        return math.abs(cross) / rLen, cross
-    end
-
-    local function registerHit(kind, ox, oy, oz, segX, segY, prevX, prevY, routeIdx, avoidDirHint)
-        local lateralDist, cross = lateralFromSegment(prevX, prevY, segX, segY, ox, oy)
-        local worldDist = getDistanceBetweenCoords2d(carX, carY, ox, oy)
-        local key = string.format("%s:%d:%d:%d", kind, math.floor(ox * 2), math.floor(oy * 2), math.floor((oz or carZ) * 2))
-        local sideScan = math.abs(avoidDirHint or 0) > 1
-        local maxLateral = sideScan and 4.4 or 3.2
-        local minWorldDist = sideScan and 1.0 or 3.0
-        local threat = worldDist + lateralDist * (sideScan and 12 or 16) + math.max(0, routeIdx - idx) * 0.30 + (sideScan and 0.4 or 0.0)
-        if sideScan and worldDist < 8.0 then
-            threat = threat - 2.8
-        end
-        if kind == "solid" then threat = threat - 2.0 end
-        local existing = found[key]
-
-        if worldDist > minWorldDist and lateralDist < maxLateral and (not existing or threat < existing.threat) then
-            found[key] = {
-                kind = kind,
-                x = ox, y = oy, z = oz or carZ,
-                worldDist = worldDist,
-                lateral = lateralDist,
-                cross = cross,
-                threat = threat,
-                urgency = 0.0,
-                routeIdx = routeIdx,
-                avoidDir = avoidDirHint or 0,
-                zDelta = 0.0,
-                sideScan = sideScan,
-            }
-        end
-    end
-
-    local function classifyEntityType(entityType)
-        if entityType == 2 then return "car" end
-        if entityType == 3 then return "ped" end
-        if entityType == 1 then return "obj" end
-        return "solid"
-    end
-
-    local function samplePoint(fromX, fromY, fromZ, sampleX, sampleY, sampleZ, routeIdx, avoidDirHint)
-        local probeFromZ = fromZ or originZ
-        local probeToZ = sampleZ or probeFromZ
-        local sideScan = math.abs(avoidDirHint or 0) > 1
-        if #S.obstacleProbes < 220 then
-            table.insert(S.obstacleProbes, {
-                x = sampleX, y = sampleY, z = probeToZ, hit = false,
-                fromX = fromX, fromY = fromY, fromZ = probeFromZ,
-                sideScan = sideScan,
-                laneHint = avoidDirHint or 0,
-            })
-        end
-
-        local ok, result, colPoint = pcall(processLineOfSight,
-            fromX, fromY, probeFromZ,
-            sampleX, sampleY, probeToZ,
-            true, true, false, true, false, false, false, false)
-        if ok and result and colPoint and colPoint.pos then
-            local kind = classifyEntityType(colPoint.entityType)
-            local hx, hy, hz = colPoint.pos[1], colPoint.pos[2], colPoint.pos[3]
-            local nz = (colPoint.normal and colPoint.normal[3]) or 0.0
-            local expectedZ = probeToZ
-            local hitWorldDist = getDistanceBetweenCoords2d(carX, carY, hx, hy)
-            if kind == "car" and hitWorldDist < 2.6 then
-                return
-            end
-            if kind == "solid" and nz > 0.62 and math.abs((hz or expectedZ) - expectedZ) < 1.45 then
-                return
-            end
-            if kind ~= "car" and (hz or expectedZ) < carZ + 0.15 then
-                return
-            end
-            if #S.obstacleProbes > 0 then
-                local probe = S.obstacleProbes[#S.obstacleProbes]
-                probe.x, probe.y, probe.z, probe.hit, probe.kind = hx, hy, hz or probeToZ, true, kind
-            end
-            registerHit(kind, hx, hy, hz or probeToZ, sampleX, sampleY, fromX, fromY, routeIdx, avoidDirHint)
-            local key = string.format("%s:%d:%d:%d", kind, math.floor(hx * 2), math.floor(hy * 2), math.floor((hz or probeToZ) * 2))
-            if found[key] then
-                found[key].zDelta = math.abs((hz or probeToZ) - expectedZ)
-                found[key].urgency = obstacleUrgency(found[key])
-            end
-        end
-    end
-
-    do
-        local frontIdx = math.min(idx + LOOKAHEAD, n)
-        local frontPoint = route[frontIdx] or route[idx]
-        if frontPoint then
-            local fx = carForwardX
-            local fy = carForwardY
-            local fLen = math.sqrt(fx * fx + fy * fy)
-            if fLen > 0.1 then
-                local nx = fx / fLen
-                local ny = fy / fLen
-                local lx = carLeftX
-                local ly = carLeftY
-                local frontOffset = 1.15
-                local shoulderOffset = 2.35
-                local outerOffset = 3.55
-                local frontZ = (frontPoint.z or carZ) + 0.65
-                local carSpeed = getCarSpeed(car)
-                local forwardReach = math.max(48.0, math.min(72.0, 36.0 + carSpeed * 0.22))
-                for dist = 6, forwardReach, 4 do
-                    local fromDist = math.max(0.0, dist - 4.0)
-                    local distAlpha = dist / forwardReach
-                    local fromAlpha = fromDist / forwardReach
-                    local fromCX = carX + nx * fromDist
-                    local fromCY = carY + ny * fromDist
-                    local fromCZ = originZ + (frontZ - originZ) * fromAlpha
-                    local toCX = carX + nx * dist
-                    local toCY = carY + ny * dist
-                    local toCZ = originZ + (frontZ - originZ) * distAlpha
-                    samplePoint(fromCX, fromCY, fromCZ, toCX, toCY, toCZ, idx + dist * 0.25, 0)
-                    samplePoint(fromCX + lx * frontOffset, fromCY + ly * frontOffset, fromCZ, toCX + lx * frontOffset, toCY + ly * frontOffset, toCZ, idx + dist * 0.25, -1)
-                    samplePoint(fromCX - lx * frontOffset, fromCY - ly * frontOffset, fromCZ, toCX - lx * frontOffset, toCY - ly * frontOffset, toCZ, idx + dist * 0.25, 1)
-                    if dist >= 10 then
-                        samplePoint(fromCX + lx * shoulderOffset, fromCY + ly * shoulderOffset, fromCZ, toCX + lx * shoulderOffset, toCY + ly * shoulderOffset, toCZ, idx + dist * 0.25, -2)
-                        samplePoint(fromCX - lx * shoulderOffset, fromCY - ly * shoulderOffset, fromCZ, toCX - lx * shoulderOffset, toCY - ly * shoulderOffset, toCZ, idx + dist * 0.25, 2)
-                    end
-                    if dist >= 18 then
-                        samplePoint(fromCX + lx * outerOffset, fromCY + ly * outerOffset, fromCZ, toCX + lx * outerOffset, toCY + ly * outerOffset, toCZ, idx + dist * 0.25, -2)
-                        samplePoint(fromCX - lx * outerOffset, fromCY - ly * outerOffset, fromCZ, toCX - lx * outerOffset, toCY - ly * outerOffset, toCZ, idx + dist * 0.25, 2)
-                    end
-                end
-            end
-        end
-    end
-
-    do
-        local sideIdx = math.min(idx + 2, n)
-        local sidePoint = route[sideIdx] or route[idx]
-        if sidePoint then
-            local fx = carForwardX
-            local fy = carForwardY
-            local fLen = math.sqrt(fx * fx + fy * fy)
-            if fLen > 0.1 then
-                local nx = fx / fLen
-                local ny = fy / fLen
-                local lx = carLeftX
-                local ly = carLeftY
-                local sideTopZ = (sidePoint.z or carZ) + 0.55
-                for dist = 0, 8, 2 do
-                    local alpha = dist / 8.0
-                    local baseX = carX + nx * dist
-                    local baseY = carY + ny * dist
-                    local baseZ = originZ + (sideTopZ - originZ) * alpha
-                    local sideReach = 2.1 + dist * 0.12
-                    samplePoint(baseX, baseY, baseZ, baseX + lx * sideReach, baseY + ly * sideReach, baseZ, idx + dist * 0.2, -2)
-                    samplePoint(baseX, baseY, baseZ, baseX - lx * sideReach, baseY - ly * sideReach, baseZ, idx + dist * 0.2, 2)
-                    samplePoint(baseX + nx * 0.9, baseY + ny * 0.9, baseZ, baseX + nx * 1.8 + lx * (sideReach + 0.6), baseY + ny * 1.8 + ly * (sideReach + 0.6), baseZ, idx + dist * 0.2, -2)
-                    samplePoint(baseX + nx * 0.9, baseY + ny * 0.9, baseZ, baseX + nx * 1.8 - lx * (sideReach + 0.6), baseY + ny * 1.8 - ly * (sideReach + 0.6), baseZ, idx + dist * 0.2, 2)
-                end
-            end
-        end
-    end
-
-    do
-        local nearIdx = math.min(idx + 1, n)
-        local nearPoint = route[nearIdx] or route[idx]
-        if nearPoint then
-            local fx = carForwardX
-            local fy = carForwardY
-            local fLen = math.sqrt(fx * fx + fy * fy)
-            if fLen > 0.1 then
-                local nx = fx / fLen
-                local ny = fy / fLen
-                local lx = carLeftX
-                local ly = carLeftY
-                local cornerForward = 1.6
-                local cornerSide = 1.25
-                local cornerZ = originZ + 0.05
-
-                samplePoint(
-                    carX + nx * cornerForward + lx * cornerSide,
-                    carY + ny * cornerForward + ly * cornerSide,
-                    cornerZ,
-                    carX + nx * 2.8 + lx * 2.9,
-                    carY + ny * 2.8 + ly * 2.9,
-                    cornerZ,
-                    idx + 0.2,
-                    -2
-                )
-                samplePoint(
-                    carX + nx * cornerForward - lx * cornerSide,
-                    carY + ny * cornerForward - ly * cornerSide,
-                    cornerZ,
-                    carX + nx * 2.8 - lx * 2.9,
-                    carY + ny * 2.8 - ly * 2.9,
-                    cornerZ,
-                    idx + 0.2,
-                    2
-                )
-                samplePoint(
-                    carX + nx * 0.9 + lx * 1.45,
-                    carY + ny * 0.9 + ly * 1.45,
-                    cornerZ,
-                    carX + nx * 1.3 + lx * 2.4,
-                    carY + ny * 1.3 + ly * 2.4,
-                    cornerZ,
-                    idx + 0.1,
-                    -2
-                )
-                samplePoint(
-                    carX + nx * 0.9 - lx * 1.45,
-                    carY + ny * 0.9 - ly * 1.45,
-                    cornerZ,
-                    carX + nx * 1.3 - lx * 2.4,
-                    carY + ny * 1.3 - ly * 2.4,
-                    cornerZ,
-                    idx + 0.1,
-                    2
-                )
-            end
-        end
-    end
-
-    local routePoint = route[math.min(idx + LOOKAHEAD, n)] or route[idx]
-    local routeDx = routePoint and routePoint.x - carX or carForwardX
-    local routeDy = routePoint and routePoint.y - carY or carForwardY
-    local routeLen = math.sqrt(routeDx * routeDx + routeDy * routeDy)
-    local routeDot = routeLen > 0.1 and ((routeDx / routeLen) * carForwardX + (routeDy / routeLen) * carForwardY) or 1.0
-    local scanRouteCorridor = routeDot > -0.25 or getCarSpeed(car) < 5.0
-
-    for i = idx + 6, scanRouteCorridor and math.min(idx + 320, n) or idx + 5, 3 do
-        local p = route[i]
-        local prev = route[math.max(1, i - 1)]
-        local prevZ = (prev.z or carZ) + 0.45
-        local pz = (p.z or carZ) + 0.45
-        samplePoint(prev.x, prev.y, prevZ, p.x, p.y, pz, i, 0)
-        local segX = p.x - prev.x
-        local segY = p.y - prev.y
-        local segLen = math.sqrt(segX * segX + segY * segY)
-        if segLen > 0.1 then
-            local lx = -segY / segLen
-            local ly = segX / segLen
-            local laneOffset = 1.2
-            local shoulderOffset = 2.3
-            local outerOffset = 3.4
-            samplePoint(prev.x + lx * laneOffset, prev.y + ly * laneOffset, prevZ, p.x + lx * laneOffset, p.y + ly * laneOffset, pz, i, -1)
-            samplePoint(prev.x - lx * laneOffset, prev.y - ly * laneOffset, prevZ, p.x - lx * laneOffset, p.y - ly * laneOffset, pz, i, 1)
-            if ((i - idx) % 6) == 0 then
-                samplePoint(prev.x + lx * shoulderOffset, prev.y + ly * shoulderOffset, prevZ, p.x + lx * shoulderOffset, p.y + ly * shoulderOffset, pz, i, -2)
-                samplePoint(prev.x - lx * shoulderOffset, prev.y - ly * shoulderOffset, prevZ, p.x - lx * shoulderOffset, p.y - ly * shoulderOffset, pz, i, 2)
-            end
-            if ((i - idx) % 9) == 0 then
-                samplePoint(prev.x + lx * outerOffset, prev.y + ly * outerOffset, prevZ, p.x + lx * outerOffset, p.y + ly * outerOffset, pz, i, -2)
-                samplePoint(prev.x - lx * outerOffset, prev.y - ly * outerOffset, prevZ, p.x - lx * outerOffset, p.y - ly * outerOffset, pz, i, 2)
-            end
-        end
-    end
-
-    local bestUrgency = 0.0
-    for _, hit in pairs(found) do
-        hit.urgency = obstacleUrgency(hit)
-        local usable = (hit.sideScan and hit.lateral < 4.4 and hit.worldDist < 22.0 and hit.urgency >= 0.14)
-            or (not hit.sideScan and hit.lateral < 2.8 and hit.urgency >= 0.10)
-        if usable and hit.threat < bestThreat then
-            bestThreat = hit.threat
-            best = hit.worldDist
-            bestUrgency = hit.urgency
-            if hit.avoidDir and hit.avoidDir ~= 0 then
-                bestDir = hit.avoidDir
-            else
-                bestDir = hit.cross > 0 and -1 or 1
-            end
-        end
-        table.insert(S.obstacleHits, hit)
-    end
-
-    table.sort(S.obstacleHits, function(a, b)
-        return a.threat < b.threat
-    end)
-
-    if #S.obstacleHits == 0 then
-        best = math.huge
-        bestDir = 0
-        bestUrgency = 0.0
-    end
-
-    return best, bestDir, bestUrgency
-end
 
 local function isPlayerControlling()
     return isKeyDown(0x57) or isKeyDown(0x53) or isKeyDown(0x41) or isKeyDown(0x44) or isKeyDown(0x20)
@@ -1359,7 +844,7 @@ function main()
     if not doesDirectoryExist(paths_dir) then createDirectory(paths_dir) end
     samp = getModuleHandle("samp.dll")
     writeSharedState("IDLE")
-    printStringNow("~g~Dangis VR v5.7 ikelta!", 3000)
+    printStringNow("~g~Dangis VR v5.8 ikelta!", 3000)
     printStringNow("~w~F2-Irasyti F10-Paleisti F11-Kartoti F6-Pauze F7-Sustabdyti", 5000)
 
     lua_thread.create(function()
@@ -1472,18 +957,6 @@ function main()
                         end
                     end
 
-                    S.routeObstacleTimer = S.routeObstacleTimer + 1
-                    local obsScanInterval = (S.routeObstacleDist < 20 or S.routeObstacleUrgency > 0.4) and 2 or 6
-                    if S.routeObstacleTimer >= obsScanInterval then
-                        S.routeObstacleTimer = 0
-                        local scannedDist, scannedDir, scannedUrgency = scanRouteAhead(current_route, play_index, car)
-                        S.routeObstacleDist = scannedDist
-                        S.routeObstacleUrgency = scannedUrgency or 0.0
-                        if collisionCooldown <= 0 or S.routeAvoidDir == 0 then
-                            S.routeAvoidDir = scannedDir
-                        end
-                    end
-
                     handleFreeze(car, current_route, play_index)
                     handleAdminRotate(car)
 
@@ -1526,21 +999,7 @@ function main()
                                         S.nextNudge = os.clock() + math.random(15, 45)
                                     end
                                     local targetLateral = S.lapWander + S.nudgeOffset
-                                    if S.routeObstacleDist < 55 and S.routeAvoidDir ~= 0 and S.routeObstacleUrgency > 0.0 then
-                                        local urgency = S.routeObstacleUrgency
-                                        local strength = 0.10 + urgency * urgency * 1.55
-                                        targetLateral = targetLateral + S.routeAvoidDir * strength
-                                    end
-                                    if collisionCooldown > 0 then
-                                        local collisionDir = S.avoidRouteDir ~= 0 and S.avoidRouteDir or (S.routeAvoidDir ~= 0 and S.routeAvoidDir or 0)
-                                        local urgency = math.max(S.routeObstacleUrgency or 0.0, 0.45)
-                                        local collisionPush = 0.55 + urgency * 1.65 + math.min(0.45, collisionCooldown * 0.018)
-                                        if collisionDir ~= 0 then
-                                            targetLateral = targetLateral + collisionDir * collisionPush
-                                        end
-                                    end
-                                    local lateralLerp = S.routeObstacleUrgency > 0.65 and 0.12 or (S.routeObstacleUrgency > 0.25 and 0.085 or 0.055)
-                                    S.currentLateral = S.currentLateral + (targetLateral - S.currentLateral) * lateralLerp
+                                    S.currentLateral = S.currentLateral + (targetLateral - S.currentLateral) * 0.055
                                     tX = tX + (-ndy / nd) * S.currentLateral
                                     tY = tY + (ndx / nd) * S.currentLateral
                                 end
@@ -1549,48 +1008,10 @@ function main()
                             draw_line(tX, tY, carX, carY, carZ)
 
                             local point = current_route[play_index]
-                            local speedMult = 1.0
-                            if S.routeObstacleDist < 100 then
-                                speedMult = S.routeObstacleDist >= 20
-                                    and (0.5 + (S.routeObstacleDist - 20) / 80 * 0.5)
-                                    or 0.4
-                            end
-                            local targetSpeed = point.speed * speedMult
+                            local targetSpeed = point.speed
                             local currentSpeed = getCarSpeed(car)
 
-                            local obsX, obsY, obsZ, obsDir, obsDist = getObstacleAhead(car, tX, tY)
-                            if obsX and collisionCooldown == 0 then
-                                collisionCooldown = (obsDist and obsDist < 6) and 90 or (obsDist and obsDist < 12) and 48 or 30
-                                avoidSteerDir = avoidDir(car, obsX, obsY, tX, tY)
-                                S.avoidRouteDir = (obsDir and obsDir ~= 0)
-                                    and (obsDir < 0 and -1 or 1)
-                                    or routeAvoidDirFromPoint(carX, carY, tX, tY, obsX, obsY)
-                                S.routeAvoidDir = S.avoidRouteDir
-                                if obsDist then
-                                    S.routeObstacleDist = math.min(S.routeObstacleDist, obsDist)
-                                end
-                                local closeUrgency = obsDist and ((18.0 - obsDist) / 14.0) or 0.55
-                                if closeUrgency < 0.0 then closeUrgency = 0.0 end
-                                if closeUrgency > 1.0 then closeUrgency = 1.0 end
-                                S.routeObstacleUrgency = math.max(S.routeObstacleUrgency or 0.0, closeUrgency)
-                            end
-
-                            if collisionCooldown > 0 then
-                                collisionCooldown = collisionCooldown - 1
-                                if S.avoidRouteDir ~= 0 then
-                                    S.routeAvoidDir = S.avoidRouteDir
-                                end
-                            end
-
-                            local obsNow = S.routeObstacleDist or 999
-                            if collisionCooldown > 0 and obsNow < 6 then
-                                -- obstacle right in front: keep path steering but brake hard
-                                turning_mechanism(tX, tY, carX, carY, car)
-                                applySteerNoise()
-                                gasLevel = 0; brakeLevel = 255
-                                writeMemory(0xB73458 + 0x20, 1, 0, false)
-                                writeMemory(0xB73458 + 0xC, 1, 255, false)
-                            elseif sharpTurnAhead(current_route, play_index) and currentSpeed > targetSpeed * 0.7 then
+                            if sharpTurnAhead(current_route, play_index) and currentSpeed > targetSpeed * 0.7 then
                                 turning_mechanism(tX, tY, carX, carY, car)
                                 applySteerNoise()
                                 local excess = math.max(0, currentSpeed - targetSpeed * 0.7)
@@ -1724,18 +1145,9 @@ function main()
                 S.freezeNextTwitch = 0.0
                 S.freezeTwitchUntil = 0.0
                 S.freezeSteer = 0
-                S.routeObstacleDist = math.huge
-                S.routeAvoidDir = 0
-                S.routeObstacleUrgency = 0.0
-                S.routeObstacleTimer = 0
-                S.obstacleHits = {}
-                S.obstacleProbes = {}
                 suddenStopFrames = 0
                 freezeTimer = 0
                 reverseTimer = 0
-                collisionCooldown = 0
-                avoidSteerDir = 0
-                S.avoidRouteDir = 0
                 lastDriveSpeed = 0.0
                 pauseReleaseReason = ""
                 S.rotateFightUntil = 0.0
@@ -1804,20 +1216,11 @@ function main()
             S.currentLateral = 0.0
             S.nudgeFrames = 0
             S.nudgeOffset = 0.0
-            S.routeObstacleDist = math.huge
-            S.routeAvoidDir = 0
-            S.routeObstacleUrgency = 0.0
-            S.routeObstacleTimer = 0
-            S.obstacleHits = {}
-            S.obstacleProbes = {}
             suddenStopFrames = 0
             freezeTimer = 0
             reverseTimer = 0
             lastDriveSpeed = 0.0
             steerBuf = {0, 0}
-            collisionCooldown = 0
-            avoidSteerDir = 0
-            S.avoidRouteDir = 0
             pauseReleaseReason = ""
             S.rotateFightUntil = 0.0
             S.rotateReleaseUntil = 0.0
@@ -1833,29 +1236,6 @@ function main()
                 lastTrail = {}
             end
             showMsg(showTrail and "~g~Trajektorija IJUNGTA!" or "~r~Trajektorija ISJUNGTA!")
-        end
-
-        if isKeyJustPressed(VK_F3) then
-            if not S.showObstacleDots then
-                S.showObstacleDots = true
-                S.obstacleDebugMode = 1
-            elseif (S.obstacleDebugMode or 1) == 1 then
-                S.obstacleDebugMode = 2
-            else
-                S.showObstacleDots = false
-                S.obstacleDebugMode = 0
-            end
-            if not S.showObstacleDots then
-                S.obstacleHits = {}
-                S.obstacleProbes = {}
-            end
-            if not S.showObstacleDots then
-                showMsg("~r~Kliuciu debug ISJUNGTAS!")
-            elseif S.obstacleDebugMode == 2 then
-                showMsg("~g~Kliuciu debug PILNAS!")
-            else
-                showMsg("~g~Kliuciu taskai IJUNGTI!")
-            end
         end
 
         if showTrail then
