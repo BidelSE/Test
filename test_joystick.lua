@@ -141,15 +141,20 @@ local function pollAll()
                 nb      = nb,
                 pov     = povStr,
             })
-        elseif ret == 167 then
-            -- JOYERR_UNPLUGGED — slot exists but nothing plugged in, skip silently
+        elseif ret == 160  -- MMSYSERR_NODRIVER  (no driver for this slot)
+            or ret == 161  -- MMSYSERR_INVALPARAM
+            or ret == 165  -- JOYERR_PARMS (slot mapped but no device — common in VMware)
+            or ret == 166  -- JOYERR_NOCANDO
+            or ret == 167  -- JOYERR_UNPLUGGED
+        then
+            -- slot present but nothing connected — skip silently
         else
-            table.insert(result, { slot = slot, err = string.format("joyGetPosEx error %d", ret) })
+            table.insert(result, { slot = slot, err = string.format("slot %d: unknown error %d", slot, ret) })
         end
     end
 
     if #result == 0 then
-        result[1] = { err = "no joystick connected (all slots empty)" }
+        result[1] = { err = "no joystick connected" }
     end
 
     return result
