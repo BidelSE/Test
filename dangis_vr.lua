@@ -1580,25 +1580,16 @@ function main()
                                 if S.avoidRouteDir ~= 0 then
                                     S.routeAvoidDir = S.avoidRouteDir
                                 end
-                                setGameKeyState(0, avoidSteerDir)
-                                local obsNow = S.routeObstacleDist or 999
-                                if obsNow < 6 then
-                                    gasLevel = 0; brakeLevel = 255
-                                elseif currentSpeed < 8 then
-                                    gasLevel = 150
-                                    brakeLevel = 0
-                                elseif currentSpeed < 18 then
-                                    gasLevel = 60
-                                    brakeLevel = 0
-                                elseif currentSpeed < 28 then
-                                    gasLevel = 0
-                                    brakeLevel = 120
-                                else
-                                    gasLevel = 0
-                                    brakeLevel = 200
-                                end
-                                writeMemory(0xB73458 + 0x20, 1, gasLevel, false)
-                                writeMemory(0xB73458 + 0xC, 1, brakeLevel, false)
+                            end
+
+                            local obsNow = S.routeObstacleDist or 999
+                            if collisionCooldown > 0 and obsNow < 6 then
+                                -- obstacle right in front: keep path steering but brake hard
+                                turning_mechanism(tX, tY, carX, carY, car)
+                                applySteerNoise()
+                                gasLevel = 0; brakeLevel = 255
+                                writeMemory(0xB73458 + 0x20, 1, 0, false)
+                                writeMemory(0xB73458 + 0xC, 1, 255, false)
                             elseif sharpTurnAhead(current_route, play_index) and currentSpeed > targetSpeed * 0.7 then
                                 turning_mechanism(tX, tY, carX, carY, car)
                                 applySteerNoise()
