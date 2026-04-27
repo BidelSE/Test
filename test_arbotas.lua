@@ -1,5 +1,5 @@
 script_name('test_arbotas')
-script_version('1.0')
+script_version('1.2')
 require 'lib.moonloader'
 
 -- F5        : show fake Ar zmogus dialog, bot auto-answers after 3-7s
@@ -12,6 +12,34 @@ local cursor = 1
 local botResult = nil
 local botRunning = false
 local font = nil
+local dialog_flag_file = getWorkingDirectory() .. "/dangis_vr_dialog.flag"
+
+local function clearSharedDialogState()
+    _G.VR_TEST_ARBOTAS = false
+    _G.VR_DIALOG_ACTIVE = false
+    _G.VR_DIALOG_KIND = nil
+    _G.VR_DIALOG_TITLE = nil
+    _G.VR_DIALOG_EMPTY_INDEX = nil
+    os.remove(dialog_flag_file)
+end
+
+local function publishSharedDialogState()
+    _G.VR_TEST_ARBOTAS = active
+    _G.VR_DIALOG_ACTIVE = active
+    _G.VR_DIALOG_KIND = active and "fake_ar_zmogus" or nil
+    _G.VR_DIALOG_TITLE = active and "Ar zmogus" or nil
+    _G.VR_DIALOG_EMPTY_INDEX = active and emptyIdx or nil
+    if active then
+        local file = io.open(dialog_flag_file, "w")
+        if file then
+            file:write("fake_arbotas\n")
+            file:write(tostring(emptyIdx) .. "\n")
+            file:close()
+        end
+    else
+        os.remove(dialog_flag_file)
+    end
+end
 
 local function fakeLine()
     local r = math.random(5)
@@ -31,7 +59,7 @@ end
 
 function main()
     wait(0)
-    _G.VR_TEST_ARBOTAS = false
+    clearSharedDialogState()
     while true do
         wait(0)
 
@@ -40,7 +68,7 @@ function main()
                 active = false
                 botResult = nil
                 botRunning = false
-                _G.VR_TEST_ARBOTAS = false
+                clearSharedDialogState()
             else
                 local nItems = math.random(8, 13)
                 local ePos   = math.random(3, nItems)
@@ -53,21 +81,24 @@ function main()
                 botResult  = nil
                 botRunning = true
                 active     = true
-                _G.VR_TEST_ARBOTAS = true
+                publishSharedDialogState()
 
                 lua_thread.create(function()
                     wait(math.random(3000, 7000))
+                    if not active then return end
                     for _ = 1, emptyIdx - 1 do
+                        if not active then return end
                         cursor = math.min(cursor + 1, #lines)
                         wait(math.random(40, 90))
                     end
                     wait(math.random(300, 800))
+                    if not active then return end
                     botResult  = lines[cursor] == ""
                     botRunning = false
                     wait(3000)
                     active             = false
                     botResult          = nil
-                    _G.VR_TEST_ARBOTAS = false
+                    clearSharedDialogState()
                 end)
             end
         end
@@ -78,6 +109,7 @@ function main()
         end
 
         if active and font then
+            publishSharedDialogState()
             local dw      = 310
             local lineH   = 17
             local headerH = 54
