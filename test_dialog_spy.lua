@@ -1,5 +1,5 @@
 script_name('test_dialog_spy')
-script_version('2.4')
+script_version('2.5')
 require 'lib.moonloader'
 
 -- Memory-only dialog debugger. No samp.* functions used.
@@ -18,36 +18,53 @@ local lastOpenData = {}    -- last scan where dialog was OPEN
 local lastOpenTime = 0     -- os.clock() when that scan ran
 local KEEP_SECS    = 8     -- keep showing data this long after dialog closes
 
--- ── safe memory readers ───────────────────────────────────────────────────────
+-- ── FFI memory readers ────────────────────────────────────────────────────────
+-- MoonLoader's readMemory corrupts the LuaJIT coroutine state when it hits bad
+-- memory, so pcall can never catch it. Use FFI + IsBadReadPtr instead:
+-- validate each address range before touching it, then read via raw pointer.
+
+local ffi = require("ffi")
+pcall(ffi.cdef, [[
+    int IsBadReadPtr(const void* lp, unsigned int ucb);
+]])
+local _k32 = ffi.load("kernel32")
+
+local function _ok(addr, n)
+    if not addr or addr < 0x10000 or addr > 0x7FFFFFFF then return false end
+    return _k32.IsBadReadPtr(ffi.cast("void*", addr), n or 1) == 0
+end
 
 local function rByte(addr)
-    if not addr or addr < 0x10000 or addr > 0x7FFFFFFF then return nil end
-    local ok, v = pcall(readMemory, addr, 1, false)
-    return ok and v or nil
+    if not _ok(addr, 1) then return nil end
+    return ffi.cast("uint8_t*",  addr)[0]
 end
 
 local function rWord(addr)
-    if not addr or addr < 0x10000 or addr > 0x7FFFFFFF then return nil end
-    local ok, v = pcall(readMemory, addr, 2, false)
-    return ok and v or nil
+    if not _ok(addr, 2) then return nil end
+    return ffi.cast("uint16_t*", addr)[0]
 end
 
 local function rDword(addr)
-    if not addr or addr < 0x10000 or addr > 0x7FFFFFFF then return nil end
-    local ok, v = pcall(readMemory, addr, 4, false)
-    return ok and v or nil
+    if not _ok(addr, 4) then return nil end
+    return ffi.cast("uint32_t*", addr)[0]
 end
 
--- read a null-terminated string; replaces non-printable bytes with '?'
--- also keeps newline (0x0A) as a real newline so we can split items later
--- Uses rByte() for each character so each read has its own pcall — avoids
--- the LuaJIT coroutine / pcall-closure crash that pcall(function()...end) causes.
+-- Read null-terminated string; non-ASCII → '?', 0x0A kept as newline.
+-- Checks page validity at every 4 KB boundary so we never cross into a bad page.
 local function rStr(addr, maxLen)
-    if not addr or addr < 0x10000 or addr > 0x7FFFFFFF then return nil end
-    local s = ""
-    for i = 0, (maxLen or 128) - 1 do
-        local b = rByte(addr + i)
-        if b == nil or b == 0 then break end
+    if not _ok(addr, 1) then return nil end
+    local s      = ""
+    local limit  = (maxLen or 128) - 1
+    local okPage = math.floor(addr / 4096)
+    for i = 0, limit do
+        local cur  = addr + i
+        local page = math.floor(cur / 4096)
+        if page ~= okPage then
+            if not _ok(cur, 1) then break end
+            okPage = page
+        end
+        local b = ffi.cast("uint8_t*", cur)[0]
+        if b == 0 then break end
         if b == 0x0A then
             s = s .. "\n"
         elseif b >= 32 and b <= 126 then
@@ -146,16 +163,16 @@ local function scan()
 
     -- Also scan other pointers in first 0x60 bytes to find more candidates
     for off = 0x28, 0x5C, 4 do
-        if off == 0x34 then goto continue end  -- already done
-        local ptr = rDword(dPtr + off)
-        if ptr and ptr >= 0x10000 and ptr < 0x7F000000 then
-            local s = rStr(ptr, 4096)
-            if s then
-                local nl = 0; s:gsub("\n", function() nl = nl + 1 end)
-                if nl > bestNL then bestBlob, bestNL, bestOff = s, nl, off end
+        if off ~= 0x34 then   -- +0x34 already checked above
+            local ptr = rDword(dPtr + off)
+            if ptr and ptr >= 0x10000 and ptr < 0x7F000000 then
+                local s = rStr(ptr, 4096)
+                if s then
+                    local nl = 0; s:gsub("\n", function() nl = nl + 1 end)
+                    if nl > bestNL then bestBlob, bestNL, bestOff = s, nl, off end
+                end
             end
         end
-        ::continue::
     end
 
     if bestBlob and bestNL >= 1 then
@@ -229,9 +246,10 @@ function main()
                 if wasOpen then
                     lines = newLines
                 elseif os.clock() - lastOpenTime < KEEP_SECS and #lastOpenData > 0 then
-                    lines = lastOpenData
-                    lines[1] = lines[1] .. string.format(
-                        "  [closed %.0fs ago]", os.clock() - lastOpenTime)
+                    -- build a fresh table — do NOT mutate lastOpenData
+                    local ago = math.floor(os.clock() - lastOpenTime)
+                    lines = { string.format("[CLOSED %ds ago — last open data]", ago) }
+                    for i = 2, #lastOpenData do lines[#lines + 1] = lastOpenData[i] end
                 else
                     lines = newLines
                 end
