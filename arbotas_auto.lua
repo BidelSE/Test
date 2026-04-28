@@ -1,5 +1,5 @@
 script_name('arbotas_auto')
-script_version('1.2')
+script_version('1.3')
 require 'lib.moonloader'
 
 -- Detects the real /arbotas server dialog (and test_arbotas.lua test dialog).
@@ -116,8 +116,8 @@ local function navigateAndClick(emptyIdx)
     lua_thread.create(function()
         wait(math.random(300, 600))    -- let SAMP settle focus on the dialog
         for i = 1, emptyIdx do
-            u32.keybd_event(0x28, 0, 0, nil)  -- VK_DOWN press
-            u32.keybd_event(0x28, 0, 2, nil)  -- VK_DOWN release
+            u32.keybd_event(0x28, 0x50, 0x01, nil)  -- VK_DOWN press  (extended key, scan E0 50)
+            u32.keybd_event(0x28, 0x50, 0x03, nil)  -- VK_DOWN release (extended | keyup)
             wait(math.random(65, 130))
         end
         wait(math.random(200, 450))
