@@ -48,7 +48,9 @@ function main()
             else
                 -- Build item list: 2 fixed header rows + 8-13 random rows (one empty).
                 local nItems  = math.random(8, 13)
-                local emptyAt = math.random(1, nItems)  -- 1-based within actual items
+                -- Never put the empty row at the very last position: parseItems strips
+                -- trailing empty entries as blob artifacts, which would hide it from detection.
+                local emptyAt = math.random(1, nItems - 1)  -- 1-based within actual items
 
                 local rows = {
                     "Pasirinkite tuscia eilute",
