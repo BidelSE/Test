@@ -64,7 +64,10 @@ function main()
                     "{FF4444}Pasirinkus blogai galima gauti Ban",
                 }
                 for i = 1, nItems do
-                    rows[#rows + 1] = (i == emptyAt) and "" or fakeLine()
+                    -- Use a space instead of "" so SAMP renders it as a visible
+                    -- blank row and arrow-key navigation can land on it.
+                    -- stripColor trims it to "" so arbotas_auto still detects it.
+                    rows[#rows + 1] = (i == emptyAt) and " " or fakeLine()
                 end
 
                 -- 0-based index of the blank row in the full list.
