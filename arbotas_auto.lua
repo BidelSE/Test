@@ -1,5 +1,5 @@
 script_name('arbotas_auto')
-script_version('1.4')
+script_version('1.5')
 require 'lib.moonloader'
 
 -- Handles two /arbotas dialog types detected via direct SAMP memory reads:
@@ -70,8 +70,6 @@ end
 
 -- True when rawLine has 3+ color codes where R1, G1, B1 are all 'f'/'F'.
 -- Catches white/near-white shades: {FFFFFF}, {F5F5F5}, {FAFAFA}, etc.
--- The "baltai" dialog uses exactly this range; colored distractors (e.g.
--- {44FF44}, {AADDFF}) have non-'f' first digits and never match.
 local function isAllWhiteLine(rawLine)
     local count = 0
     for code in rawLine:gmatch("{(%x%x%x%x%x%x)}") do
@@ -82,6 +80,13 @@ local function isAllWhiteLine(rawLine)
         end
     end
     return count >= 3
+end
+
+-- True when stripped looks like "N N N" — three integers separated by
+-- whitespace. The header row in "baltai" dialogs can use white-ish color
+-- codes for word rendering, so we require numeric content too.
+local function looksLikeThreeNumbers(s)
+    return s:match("^%s*%d+%s+%d+%s+%d+%s*$") ~= nil
 end
 
 -- Returns dialogId, targetIdx (0-based), kind ("baltai"|"tuscia"); or nil.
@@ -113,8 +118,10 @@ local function scanArbotasDialog()
     if #rawLines < 5 or #rawLines > 20 then return nil end
 
     -- "baltai" check first: a fake empty row in this dialog must not win.
+    -- Both guards required: white-ish codes AND "N N N" numeric content.
+    -- Excludes the header (which may use {fXfXfX} per word) and any non-data row.
     for i, rawLine in ipairs(rawLines) do
-        if isAllWhiteLine(rawLine) then
+        if looksLikeThreeNumbers(stripped[i]) and isAllWhiteLine(rawLine) then
             return dialogId, i - 1, "baltai"
         end
     end
@@ -162,7 +169,7 @@ function main()
         printStringNow("~r~arbotas_auto: samp.dll nav!", 3000)
         return
     end
-    printStringNow("~g~Arbotas auto v1.4 ikelta!", 2000)
+    printStringNow("~g~Arbotas auto v1.5 ikelta!", 2000)
 
     local lastAnsweredId = -1
     local dialogWasOpen  = false
