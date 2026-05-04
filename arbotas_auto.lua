@@ -1,13 +1,17 @@
 script_name('arbotas_auto')
-script_version('1.3')
+script_version('1.4')
 require 'lib.moonloader'
 
--- Detects the real /arbotas server dialog (and test_arbotas.lua test dialog).
--- Waits a human-like delay, then presses DOWN emptyIdx times + ENTER.
+-- Handles two /arbotas dialog types detected via direct SAMP memory reads:
 --
--- Detection: LIST dialog (type 2), 5-20 items, exactly 1 item that is empty
--- after stripping SAMP color codes and trimming whitespace.
--- A blank row in SAMP is stored as " " (space), which stripColor trims to "".
+--   "baltai"  – one row has all 3 numbers in a white-ish color ({fXfXfX}).
+--               An empty row may appear as a distractor — it is ignored.
+--               White-color check runs FIRST so the distractor never wins.
+--
+--   "tuscia"  – one row is blank (space that stripColor trims to "").
+--               Only reached when no white-colored row exists.
+--
+-- No samp.* API used anywhere.
 
 local samp = 0
 
@@ -64,17 +68,23 @@ local function stripColor(s)
     return (s:gsub("{%x%x%x%x%x%x}", ""):match("^%s*(.-)%s*$"))
 end
 
-local function parseItems(blob)
-    local items = {}
-    for line in (blob .. "\n"):gmatch("([^\n]*)\n") do
-        table.insert(items, stripColor(line))
+-- True when rawLine has 3+ color codes where R1, G1, B1 are all 'f'/'F'.
+-- Catches white/near-white shades: {FFFFFF}, {F5F5F5}, {FAFAFA}, etc.
+-- The "baltai" dialog uses exactly this range; colored distractors (e.g.
+-- {44FF44}, {AADDFF}) have non-'f' first digits and never match.
+local function isAllWhiteLine(rawLine)
+    local count = 0
+    for code in rawLine:gmatch("{(%x%x%x%x%x%x)}") do
+        if code:sub(1,1):lower() == 'f'
+        and code:sub(3,3):lower() == 'f'
+        and code:sub(5,5):lower() == 'f' then
+            count = count + 1
+        end
     end
-    while #items > 0 and items[#items] == "" do
-        table.remove(items)
-    end
-    return items
+    return count >= 3
 end
 
+-- Returns dialogId, targetIdx (0-based), kind ("baltai"|"tuscia"); or nil.
 local function scanArbotasDialog()
     if samp == 0 then return nil end
     local dPtr = rDword(samp + 0x21A0B8)
@@ -89,23 +99,42 @@ local function scanArbotasDialog()
     local blob = rStr(p34, 4096)
     if not blob then return nil end
 
-    local items = parseItems(blob)
-    if #items < 5 or #items > 20 then return nil end
+    local rawLines = {}
+    local stripped = {}
+    for line in (blob .. "\n"):gmatch("([^\n]*)\n") do
+        table.insert(rawLines, line)
+        table.insert(stripped, stripColor(line))
+    end
+    while #rawLines > 0 and stripped[#stripped] == "" do
+        table.remove(rawLines)
+        table.remove(stripped)
+    end
 
+    if #rawLines < 5 or #rawLines > 20 then return nil end
+
+    -- "baltai" check first: a fake empty row in this dialog must not win.
+    for i, rawLine in ipairs(rawLines) do
+        if isAllWhiteLine(rawLine) then
+            return dialogId, i - 1, "baltai"
+        end
+    end
+
+    -- "tuscia" check: exactly one blank row, no white-colored rows present.
     local emptyIdx, emptyCount = nil, 0
-    for i, item in ipairs(items) do
-        if item == "" then
+    for i, s in ipairs(stripped) do
+        if s == "" then
             emptyCount = emptyCount + 1
             emptyIdx   = i - 1
         end
     end
+    if emptyCount == 1 then
+        return dialogId, emptyIdx, "tuscia"
+    end
 
-    if emptyCount ~= 1 or emptyIdx == nil then return nil end
-    return dialogId, emptyIdx
+    return nil
 end
 
--- Press DOWN emptyIdx times then ENTER to select and confirm the blank row.
-local function navigateAndClick(emptyIdx)
+local function navigateAndClick(targetIdx)
     pcall(ffi.cdef, "void keybd_event(unsigned char, unsigned char, unsigned long, unsigned long*);")
     local u32ok, u32 = pcall(ffi.load, "user32")
     if not u32ok then
@@ -114,15 +143,15 @@ local function navigateAndClick(emptyIdx)
     end
 
     lua_thread.create(function()
-        wait(math.random(300, 600))    -- let SAMP settle focus on the dialog
-        for i = 1, emptyIdx do
-            u32.keybd_event(0x28, 0x50, 0x01, nil)  -- VK_DOWN press  (extended key, scan E0 50)
-            u32.keybd_event(0x28, 0x50, 0x03, nil)  -- VK_DOWN release (extended | keyup)
+        wait(math.random(300, 600))
+        for i = 1, targetIdx do
+            u32.keybd_event(0x28, 0x50, 0x01, nil)  -- VK_DOWN press (extended key, scan E0 50)
+            u32.keybd_event(0x28, 0x50, 0x03, nil)  -- VK_DOWN release
             wait(math.random(65, 130))
         end
         wait(math.random(200, 450))
-        u32.keybd_event(0x0D, 0, 0, nil)  -- VK_RETURN press
-        u32.keybd_event(0x0D, 0, 2, nil)  -- VK_RETURN release
+        u32.keybd_event(0x0D, 0, 0, nil)   -- VK_RETURN press
+        u32.keybd_event(0x0D, 0, 2, nil)   -- VK_RETURN release
     end)
 end
 
@@ -133,23 +162,23 @@ function main()
         printStringNow("~r~arbotas_auto: samp.dll nav!", 3000)
         return
     end
-    printStringNow("~g~Arbotas auto v1.2 ikelta!", 2000)
+    printStringNow("~g~Arbotas auto v1.4 ikelta!", 2000)
 
     local lastAnsweredId = -1
     local dialogWasOpen  = false
     local pending        = false
     local pendingId      = -1
     local pendingIdx     = -1
+    local pendingKind    = ""
     local pendingAt      = 0
 
     while true do
         wait(0)
         local now = os.clock()
 
-        local dialogId, emptyIdx = scanArbotasDialog()
+        local dialogId, targetIdx, kind = scanArbotasDialog()
         local dialogOpen = dialogId ~= nil
 
-        -- Reset when dialog closes so the next arbotas (real or test) is detected.
         if not dialogOpen and dialogWasOpen then
             lastAnsweredId = -1
             if pending then
@@ -159,27 +188,28 @@ function main()
         end
         dialogWasOpen = dialogOpen
 
-        -- Fire the queued answer once the delay has elapsed.
         if pending and now >= pendingAt then
             pending = false
-            if dialogId == pendingId and emptyIdx == pendingIdx then
+            if dialogId == pendingId and targetIdx == pendingIdx then
                 lastAnsweredId = pendingId
                 navigateAndClick(pendingIdx)
-                printStringNow("~g~Arbotas: einu i eilute [" .. tostring(pendingIdx) .. "]...", 4000)
+                printStringNow(string.format(
+                    "~g~Arbotas: einu i eilute [%d] (%s)...", pendingIdx, pendingKind), 4000)
             else
                 printStringNow("~y~Arbotas: dialogo nebebuvo, praleista.", 2000)
             end
         end
 
-        -- Detect a new dialog.
         if not pending and dialogOpen and dialogId ~= lastAnsweredId then
-            pending    = true
-            pendingId  = dialogId
-            pendingIdx = emptyIdx
+            pending     = true
+            pendingId   = dialogId
+            pendingIdx  = targetIdx
+            pendingKind = kind
             local delay = math.random(2000, 5500) / 1000.0
-            pendingAt  = now + delay
+            pendingAt   = now + delay
             printStringNow(string.format(
-                "~y~Arbotas aptiktas! Atsakysiu po %.1fs... [%d]", delay, emptyIdx), 6000)
+                "~y~Arbotas (%s) aptiktas! Atsakysiu po %.1fs... [%d]",
+                kind, delay, targetIdx), 6000)
         end
     end
 end
