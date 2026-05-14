@@ -1,0 +1,18 @@
+# Secrets — DB creds, Discord webhooks, AC replay key. Never commit.
+configs/sarglt_secrets.cfg
+**/sarglt_secrets.cfg
+
+# Build output
+*.amxx
+*.amx
+*.o
+
+# Local logs
+logs/
+*.log
+
+# Editor noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
