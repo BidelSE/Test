@@ -102,6 +102,9 @@ new bool:g_warned_missing_mode_cvar;
 new g_slot_count_cache;
 new g_slot_authid_cache[MAX_TRACKED_PLAYERS + 1][AUTH_LEN];
 
+new g_clean_name[MAX_CLIENTS + 1][NAME_LEN];
+new bool:g_tag_lock[MAX_CLIENTS + 1];
+
 new g_cvar_enabled;
 new g_cvar_start;
 new g_cvar_placement_enabled;
@@ -163,6 +166,9 @@ new g_cvar_daily_mult_2;
 new g_cvar_daily_mult_3;
 new g_cvar_daily_mult_4;
 new g_cvar_current_mode;
+new g_cvar_scoreboard_tags;
+new g_cvar_scoreboard_titles_only;
+new g_cvar_scoreboard_show_exact;
 
 public plugin_init()
 {
@@ -229,6 +235,9 @@ public plugin_init()
     g_cvar_daily_mult_2 = register_cvar("savekai_elo_daily_mult_2", "0.50");
     g_cvar_daily_mult_3 = register_cvar("savekai_elo_daily_mult_3", "0.25");
     g_cvar_daily_mult_4 = register_cvar("savekai_elo_daily_mult_4", "0.10");
+    g_cvar_scoreboard_tags = register_cvar("savekai_elo_scoreboard_tags", "1");
+    g_cvar_scoreboard_titles_only = register_cvar("savekai_elo_scoreboard_titles_only", "1");
+    g_cvar_scoreboard_show_exact = register_cvar("savekai_elo_scoreboard_show_exact", "0");
 
     register_clcmd("say", "hook_say");
     register_clcmd("say_team", "hook_say");
@@ -239,6 +248,7 @@ public plugin_init()
     register_concmd("amx_giveelo", "concmd_giveelo", ADMIN_RCON, "<player> <amount>");
     register_concmd("amx_takeelo", "concmd_takeelo", ADMIN_RCON, "<player> <amount>");
     register_concmd("amx_eloreload", "concmd_eloreload", ADMIN_RCON, "reload SAVEKAI ELO data");
+    register_concmd("amx_elotags_refresh", "concmd_elotags_refresh", ADMIN_RCON, "refresh all SAVEKAI ELO TAB tags");
 
     register_logevent("logevent_round_start", 2, "1=Round_Start");
     register_logevent("logevent_round_end", 2, "1=Round_End");
@@ -311,6 +321,44 @@ public client_disconnected(id)
     remove_task(id);
     reset_round_player(id);
     reset_player_memory(id);
+}
+
+public client_infochanged(id)
+{
+    if (id < 1 || id > MAX_CLIENTS || !is_user_connected(id) || is_user_bot(id) || is_user_hltv(id))
+    {
+        return;
+    }
+
+    if (g_tag_lock[id])
+    {
+        return;
+    }
+
+    new info_name[NAME_LEN];
+    get_user_info(id, "name", info_name, charsmax(info_name));
+    strip_elo_tags(info_name, charsmax(info_name));
+
+    if (info_name[0] == 0)
+    {
+        return;
+    }
+
+    copy(g_clean_name[id], NAME_LEN - 1, info_name);
+    update_scoreboard_tag(id);
+}
+
+public concmd_elotags_refresh(id, level, cid)
+{
+    if (!cmd_access(id, level, cid, 1))
+    {
+        return PLUGIN_HANDLED;
+    }
+
+    refresh_all_scoreboard_tags();
+    console_print(id, "[SAVEKAI ELO] Refreshed TAB tags for all connected players.");
+    log_admin_change(id, 0, "elotags_refresh", 0, 0, 0);
+    return PLUGIN_HANDLED;
 }
 
 public task_load_player(id)
@@ -520,6 +568,7 @@ public concmd_resetelo(id, level, cid)
     g_session_losses[target] = 0;
 
     save_player(target, true);
+    update_scoreboard_tag(target);
     announce_admin_change(id, target, "reset", start_elo, 0);
     return PLUGIN_HANDLED;
 }
@@ -592,6 +641,7 @@ public concmd_eloreload(id, level, cid)
         }
     }
 
+    refresh_all_scoreboard_tags();
     console_print(id, "[SAVEKAI ELO] Reloaded ELO data for connected players.");
     log_admin_change(id, 0, "reload", 0, 0, 0);
     return PLUGIN_HANDLED;
@@ -1009,6 +1059,7 @@ stock apply_round_delta(id, Float:t_avg, Float:ct_avg, Float:map_multiplier, Flo
 
     print_round_delta(id, old_elo, new_elo, delta, expected, k, perf_delta, placement, testmode);
     log_round_delta(id, old_elo, new_elo, delta, before_softcap, expected, k, base_delta, perf_delta, daily_multiplier, placement, placement_target, placement_weight, testmode);
+    update_scoreboard_tag(id);
 }
 
 stock print_round_delta(id, old_elo, new_elo, delta, Float:expected, Float:k, Float:perf_delta, bool:placement, bool:testmode)
@@ -1894,7 +1945,8 @@ stock load_player(id)
     g_placement_weight_sum[id] = 0.0;
 
     new name[NAME_LEN];
-    get_user_name(id, name, charsmax(name));
+    get_clean_user_name(id, name, charsmax(name));
+    copy(g_clean_name[id], NAME_LEN - 1, name);
     sanitize_name(name, charsmax(name));
     copy(g_saved_name[id], NAME_LEN - 1, name);
 
@@ -1942,6 +1994,7 @@ stock load_player(id)
 
     g_loaded[id] = true;
     save_player(id, false);
+    update_scoreboard_tag(id);
 }
 
 stock save_player(id, bool:force)
@@ -1961,7 +2014,7 @@ stock save_player(id, bool:force)
     add_authid_to_slots(g_authid[id]);
 
     new name[NAME_LEN];
-    get_user_name(id, name, charsmax(name));
+    get_clean_user_name(id, name, charsmax(name));
     sanitize_name(name, charsmax(name));
 
     if (name[0] != 0)
@@ -2361,6 +2414,7 @@ stock set_player_elo_admin(admin, target, new_elo, const action[])
     }
 
     save_player(target, true);
+    update_scoreboard_tag(target);
     announce_admin_change(admin, target, action, old_elo, new_elo);
 }
 
@@ -2617,6 +2671,8 @@ stock reset_player_memory(id)
     g_loaded[id] = false;
     g_authid[id][0] = 0;
     g_saved_name[id][0] = 0;
+    g_clean_name[id][0] = 0;
+    g_tag_lock[id] = false;
     g_elo[id] = 0;
     g_ranked_rounds[id] = 0;
     g_wins[id] = 0;
@@ -2745,4 +2801,158 @@ stock bool:is_chat_command(const args[], const command[])
     }
 
     return args[command_len] == ' ';
+}
+
+stock strip_elo_tags(name[], len)
+{
+    replace_all(name, len, " [SGM]", "");
+    replace_all(name, len, " [SIM]", "");
+    replace_all(name, len, " [SM]", "");
+    replace_all(name, len, " [G]", "");
+    replace_all(name, len, " [V]", "");
+    replace_all(name, len, " [P]", "");
+    replace_all(name, len, " [N]", "");
+    replace_all(name, len, " [U]", "");
+    replace_all(name, len, "[SGM]", "");
+    replace_all(name, len, "[SIM]", "");
+    replace_all(name, len, "[SM]", "");
+    replace_all(name, len, "[G]", "");
+    replace_all(name, len, "[V]", "");
+    replace_all(name, len, "[P]", "");
+    replace_all(name, len, "[N]", "");
+    replace_all(name, len, "[U]", "");
+    trim(name);
+}
+
+stock get_clean_user_name(id, output[], output_len)
+{
+    if (id >= 1 && id <= MAX_CLIENTS && g_clean_name[id][0] != 0)
+    {
+        copy(output, output_len, g_clean_name[id]);
+        return;
+    }
+
+    get_user_name(id, output, output_len);
+    strip_elo_tags(output, output_len);
+}
+
+stock get_elo_scoreboard_tag(id, output[], output_len)
+{
+    output[0] = 0;
+
+    if (!g_loaded[id])
+    {
+        return;
+    }
+
+    if (is_placement_round_count(g_ranked_rounds[id]))
+    {
+        return;
+    }
+
+    new elo = g_elo[id];
+    new title[8];
+
+    if (elo >= 2600)
+    {
+        copy(title, charsmax(title), "SGM");
+    }
+    else if (elo >= 2400)
+    {
+        copy(title, charsmax(title), "SIM");
+    }
+    else if (elo >= 2200)
+    {
+        copy(title, charsmax(title), "SM");
+    }
+    else
+    {
+        if (get_pcvar_num(g_cvar_scoreboard_titles_only))
+        {
+            return;
+        }
+
+        if (elo >= 1800)
+        {
+            copy(title, charsmax(title), "G");
+        }
+        else if (elo >= 1400)
+        {
+            copy(title, charsmax(title), "V");
+        }
+        else if (elo >= 1000)
+        {
+            copy(title, charsmax(title), "P");
+        }
+        else
+        {
+            copy(title, charsmax(title), "N");
+        }
+    }
+
+    if (get_pcvar_num(g_cvar_scoreboard_show_exact))
+    {
+        formatex(output, output_len, "[%s %d]", title, elo);
+        return;
+    }
+
+    formatex(output, output_len, "[%s]", title);
+}
+
+stock update_scoreboard_tag(id)
+{
+    if (id < 1 || id > MAX_CLIENTS || !is_user_connected(id) || is_user_bot(id) || is_user_hltv(id))
+    {
+        return;
+    }
+
+    if (g_clean_name[id][0] == 0)
+    {
+        new captured[NAME_LEN];
+        get_user_name(id, captured, charsmax(captured));
+        strip_elo_tags(captured, charsmax(captured));
+        copy(g_clean_name[id], NAME_LEN - 1, captured);
+    }
+
+    new full[NAME_LEN];
+    copy(full, charsmax(full), g_clean_name[id]);
+
+    if (g_loaded[id] && get_pcvar_num(g_cvar_scoreboard_tags))
+    {
+        new tag[24];
+        get_elo_scoreboard_tag(id, tag, charsmax(tag));
+
+        if (tag[0] != 0)
+        {
+            formatex(full, charsmax(full), "%s %s", g_clean_name[id], tag);
+        }
+    }
+
+    if (full[0] == 0)
+    {
+        return;
+    }
+
+    new current[NAME_LEN];
+    get_user_name(id, current, charsmax(current));
+
+    if (equal(current, full))
+    {
+        return;
+    }
+
+    g_tag_lock[id] = true;
+    set_user_info(id, "name", full);
+    g_tag_lock[id] = false;
+}
+
+stock refresh_all_scoreboard_tags()
+{
+    for (new id = 1; id <= MAX_CLIENTS; id++)
+    {
+        if (is_user_connected(id) && !is_user_bot(id) && !is_user_hltv(id))
+        {
+            update_scoreboard_tag(id);
+        }
+    }
 }
