@@ -1132,32 +1132,30 @@ stock apply_round_delta(id, Float:t_avg, Float:ct_avg, Float:map_multiplier, Flo
         placement_target = calculate_placement_target(enemy_avg, won, perf_delta);
 
         /*
-         * Keep live placement ELO moving round-by-round. The weighted placement
-         * estimate is still collected, but only becomes authoritative when the
-         * placement period finishes. This avoids the visible "snap back to the
-         * same ELO" problem while a player is still in placement.
+         * Placement is a calibration period (chess / FACEIT style): every
+         * round the player's ELO is set to the running weighted average of
+         * their placement targets, so strong play climbs quickly and weak
+         * play drops. The weighted average converges smoothly so there is no
+         * snap-back. clamp_placement_elo() inside calculate_placement_estimate
+         * keeps the result inside the placement band.
          */
-        if ((g_ranked_rounds[id] + 1) >= get_placement_rounds())
-        {
-            new_elo_cents = elo_to_cents(calculate_placement_estimate(id, placement_target, placement_weight, testmode && !save_test_placement));
-        }
-        else
-        {
-            new_elo_cents = clamp_elo_cents_to_placement(new_elo_cents);
-        }
+        new_elo_cents = elo_to_cents(calculate_placement_estimate(id, placement_target, placement_weight, testmode && !save_test_placement));
     }
     else if (new_elo_cents < 0)
     {
         new_elo_cents = 0;
     }
 
-    if (!won && new_elo_cents > old_elo_cents)
+    if (!placement)
     {
-        new_elo_cents = old_elo_cents;
-    }
-    else if (won && get_pcvar_num(g_cvar_won_round_min_delta) >= 0 && new_elo_cents < old_elo_cents)
-    {
-        new_elo_cents = old_elo_cents;
+        if (!won && new_elo_cents > old_elo_cents)
+        {
+            new_elo_cents = old_elo_cents;
+        }
+        else if (won && get_pcvar_num(g_cvar_won_round_min_delta) >= 0 && new_elo_cents < old_elo_cents)
+        {
+            new_elo_cents = old_elo_cents;
+        }
     }
 
     new applied_delta_cents = new_elo_cents - old_elo_cents;
@@ -1170,7 +1168,7 @@ stock apply_round_delta(id, Float:t_avg, Float:ct_avg, Float:map_multiplier, Flo
         g_session_gain[id] += applied_delta;
         g_session_gain_cents[id] += applied_delta_cents;
 
-        if (!testmode)
+        if (!testmode && !placement)
         {
             update_daily_gain_cents(id, applied_delta_cents);
         }
