@@ -4,7 +4,7 @@
  * SAVEKAI ELO system.
  * AMX Mod X 1.10 compatible.
  *
- * Version 0.6 goals:
+ * Version 0.9 goals:
  * - Every player starts at 1000 ELO.
  * - Players are in placement before normal ELO begins.
  * - ELO is mostly based on round wins/losses.
@@ -43,7 +43,7 @@
 #include <nvault>
 
 #define PLUGIN_NAME "SAVEKAI ELO"
-#define PLUGIN_VERSION "0.6"
+#define PLUGIN_VERSION "1.8"
 #define PLUGIN_AUTHOR "SAVEKAI"
 
 #define MAX_CLIENTS 32
@@ -58,6 +58,7 @@
 #define TEAM_CT 2
 #define TEAM_NONE 0
 #define TASK_PROCESS_ROUND 9801
+#define ELO_SCALE 100
 
 new g_vault = INVALID_VAULT;
 
@@ -65,6 +66,7 @@ new bool:g_loaded[MAX_CLIENTS + 1];
 new g_authid[MAX_CLIENTS + 1][AUTH_LEN];
 new g_saved_name[MAX_CLIENTS + 1][NAME_LEN];
 new g_elo[MAX_CLIENTS + 1];
+new g_elo_cents[MAX_CLIENTS + 1];
 new g_ranked_rounds[MAX_CLIENTS + 1];
 new g_wins[MAX_CLIENTS + 1];
 new g_losses[MAX_CLIENTS + 1];
@@ -72,11 +74,14 @@ new g_highest_elo[MAX_CLIENTS + 1];
 new g_last_seen[MAX_CLIENTS + 1];
 new g_daily_day[MAX_CLIENTS + 1];
 new g_daily_gain[MAX_CLIENTS + 1];
+new g_daily_gain_cents[MAX_CLIENTS + 1];
 new Float:g_placement_target_sum[MAX_CLIENTS + 1];
 new Float:g_placement_weight_sum[MAX_CLIENTS + 1];
 
 new g_session_delta[MAX_CLIENTS + 1];
 new g_session_gain[MAX_CLIENTS + 1];
+new g_session_delta_cents[MAX_CLIENTS + 1];
+new g_session_gain_cents[MAX_CLIENTS + 1];
 new Float:g_session_placement_target_sum[MAX_CLIENTS + 1];
 new Float:g_session_placement_weight_sum[MAX_CLIENTS + 1];
 new g_session_rounds[MAX_CLIENTS + 1];
@@ -86,6 +91,7 @@ new g_session_losses[MAX_CLIENTS + 1];
 new bool:g_round_eligible[MAX_CLIENTS + 1];
 new g_round_team[MAX_CLIENTS + 1];
 new g_round_elo[MAX_CLIENTS + 1];
+new g_round_elo_cents[MAX_CLIENTS + 1];
 new g_round_kills[MAX_CLIENTS + 1];
 new g_round_deaths[MAX_CLIENTS + 1];
 new g_round_damage[MAX_CLIENTS + 1];
@@ -118,9 +124,11 @@ new g_cvar_placement_loss_shift;
 new g_cvar_placement_perf_scale;
 new g_cvar_placement_max_above_enemy;
 new g_cvar_placement_max_below_enemy;
+new g_cvar_placement_weight_multipliers;
 new g_cvar_min_leaderboard_rounds;
 new g_cvar_k_placement;
 new g_cvar_k_provisional;
+new g_cvar_provisional_rounds;
 new g_cvar_k_normal;
 new g_cvar_k_2200;
 new g_cvar_k_2400;
@@ -139,6 +147,13 @@ new g_cvar_perf_teamkill;
 new g_cvar_perf_suicide;
 new g_cvar_perf_max_bonus;
 new g_cvar_perf_max_penalty;
+new g_cvar_perf_carry_protection;
+new g_cvar_perf_carry_kills;
+new g_cvar_perf_carry_damage;
+new g_cvar_perf_carry_loss_cap;
+new g_cvar_perf_hardcarry_loss_cap;
+new g_cvar_perf_hardcarry_kills;
+new g_cvar_perf_hardcarry_damage;
 new g_cvar_lost_round_max_delta;
 new g_cvar_won_round_min_delta;
 new g_cvar_min_players;
@@ -155,8 +170,18 @@ new g_cvar_disable_non_normal_mode;
 new g_cvar_override_rank;
 new g_cvar_show_round_delta;
 new g_cvar_debug_chat;
+new g_cvar_fractional_enabled;
+new g_cvar_decimal_display;
 new g_cvar_max_team_diff;
 new g_cvar_min_team_players;
+new g_cvar_uneven_team_mode;
+new g_cvar_uneven_team_multiplier;
+new g_cvar_uneven_favorite_win_multiplier;
+new g_cvar_uneven_underdog_win_multiplier;
+new g_cvar_uneven_underdog_loss_multiplier;
+new g_cvar_uneven_favorite_loss_multiplier;
+new g_cvar_team_size_elo_bonus;
+new g_cvar_max_counted_team_diff;
 new g_cvar_daily_softcap_enabled;
 new g_cvar_daily_softcap_1;
 new g_cvar_daily_softcap_2;
@@ -169,6 +194,12 @@ new g_cvar_current_mode;
 new g_cvar_scoreboard_tags;
 new g_cvar_scoreboard_titles_only;
 new g_cvar_scoreboard_show_exact;
+new g_cvar_season;
+new g_cvar_season_name;
+new g_cvar_ignore_placement_in_team_avg;
+new g_cvar_rated_vs_placement_multiplier;
+new g_cvar_min_rated_enemies_for_full_elo;
+new g_cvar_placement_default_estimate;
 
 public plugin_init()
 {
@@ -183,18 +214,20 @@ public plugin_init()
     g_cvar_placement_min_elo = register_cvar("savekai_elo_placement_min_elo", "800");
     g_cvar_placement_max_elo = register_cvar("savekai_elo_placement_max_elo", "2000");
     g_cvar_placement_use_performance = register_cvar("savekai_elo_placement_use_performance", "1");
-    g_cvar_placement_win_shift = register_cvar("savekai_elo_placement_win_shift", "150.0");
-    g_cvar_placement_loss_shift = register_cvar("savekai_elo_placement_loss_shift", "150.0");
-    g_cvar_placement_perf_scale = register_cvar("savekai_elo_placement_perf_scale", "150.0");
-    g_cvar_placement_max_above_enemy = register_cvar("savekai_elo_placement_max_above_enemy", "300.0");
-    g_cvar_placement_max_below_enemy = register_cvar("savekai_elo_placement_max_below_enemy", "300.0");
+    g_cvar_placement_win_shift = register_cvar("savekai_elo_placement_win_shift", "220.0");
+    g_cvar_placement_loss_shift = register_cvar("savekai_elo_placement_loss_shift", "180.0");
+    g_cvar_placement_perf_scale = register_cvar("savekai_elo_placement_perf_scale", "250.0");
+    g_cvar_placement_max_above_enemy = register_cvar("savekai_elo_placement_max_above_enemy", "500.0");
+    g_cvar_placement_max_below_enemy = register_cvar("savekai_elo_placement_max_below_enemy", "400.0");
+    g_cvar_placement_weight_multipliers = register_cvar("savekai_elo_placement_weight_multipliers", "1");
     g_cvar_min_leaderboard_rounds = register_cvar("savekai_elo_min_leaderboard_rounds", "50");
-    g_cvar_k_placement = register_cvar("savekai_elo_k_placement", "6.0");
-    g_cvar_k_provisional = register_cvar("savekai_elo_k_provisional", "5.0");
-    g_cvar_k_normal = register_cvar("savekai_elo_k_normal", "4.0");
-    g_cvar_k_2200 = register_cvar("savekai_elo_k_2200", "3.0");
-    g_cvar_k_2400 = register_cvar("savekai_elo_k_2400", "2.0");
-    g_cvar_k_2600 = register_cvar("savekai_elo_k_2600", "1.5");
+    g_cvar_k_placement = register_cvar("savekai_elo_k_placement", "10.0");
+    g_cvar_k_provisional = register_cvar("savekai_elo_k_provisional", "9.0");
+    g_cvar_provisional_rounds = register_cvar("savekai_elo_provisional_rounds", "200");
+    g_cvar_k_normal = register_cvar("savekai_elo_k_normal", "7.0");
+    g_cvar_k_2200 = register_cvar("savekai_elo_k_2200", "5.0");
+    g_cvar_k_2400 = register_cvar("savekai_elo_k_2400", "3.5");
+    g_cvar_k_2600 = register_cvar("savekai_elo_k_2600", "2.5");
     g_cvar_perf_enabled = register_cvar("savekai_elo_perf_enabled", "1");
     g_cvar_perf_kill = register_cvar("savekai_elo_perf_kill", "0.35");
     g_cvar_perf_death = register_cvar("savekai_elo_perf_death", "-0.25");
@@ -209,6 +242,13 @@ public plugin_init()
     g_cvar_perf_suicide = register_cvar("savekai_elo_perf_suicide", "-1.00");
     g_cvar_perf_max_bonus = register_cvar("savekai_elo_perf_max_bonus", "2.0");
     g_cvar_perf_max_penalty = register_cvar("savekai_elo_perf_max_penalty", "-2.0");
+    g_cvar_perf_carry_protection = register_cvar("savekai_elo_perf_carry_protection", "1");
+    g_cvar_perf_carry_kills = register_cvar("savekai_elo_perf_carry_kills", "2");
+    g_cvar_perf_carry_damage = register_cvar("savekai_elo_perf_carry_damage", "150");
+    g_cvar_perf_carry_loss_cap = register_cvar("savekai_elo_perf_carry_loss_cap", "-1");
+    g_cvar_perf_hardcarry_loss_cap = register_cvar("savekai_elo_perf_hardcarry_loss_cap", "0");
+    g_cvar_perf_hardcarry_kills = register_cvar("savekai_elo_perf_hardcarry_kills", "2");
+    g_cvar_perf_hardcarry_damage = register_cvar("savekai_elo_perf_hardcarry_damage", "150");
     g_cvar_lost_round_max_delta = register_cvar("savekai_elo_lost_round_max_delta", "0");
     g_cvar_won_round_min_delta = register_cvar("savekai_elo_won_round_min_delta", "0");
     g_cvar_min_players = register_cvar("savekai_elo_min_players", "4");
@@ -219,14 +259,24 @@ public plugin_init()
     g_cvar_max_gain_round = register_cvar("savekai_elo_max_gain_round", "6");
     g_cvar_max_loss_round = register_cvar("savekai_elo_max_loss_round", "6");
     g_cvar_log_enabled = register_cvar("savekai_elo_log_enabled", "1");
-    g_cvar_testmode = register_cvar("savekai_elo_testmode", "1");
-    g_cvar_testmode_save_placement = register_cvar("savekai_elo_testmode_save_placement", "1");
+    g_cvar_testmode = register_cvar("savekai_elo_testmode", "0");
+    g_cvar_testmode_save_placement = register_cvar("savekai_elo_testmode_save_placement", "0");
     g_cvar_disable_non_normal_mode = register_cvar("savekai_elo_disable_non_normal_mode", "1");
     g_cvar_override_rank = register_cvar("savekai_elo_override_rank", "0");
     g_cvar_show_round_delta = register_cvar("savekai_elo_show_round_delta", "1");
-    g_cvar_debug_chat = register_cvar("savekai_elo_debug_chat", "1");
+    g_cvar_debug_chat = register_cvar("savekai_elo_debug_chat", "0");
+    g_cvar_fractional_enabled = register_cvar("savekai_elo_fractional_enabled", "1");
+    g_cvar_decimal_display = register_cvar("savekai_elo_decimal_display", "1");
     g_cvar_max_team_diff = register_cvar("savekai_elo_max_team_diff", "2");
     g_cvar_min_team_players = register_cvar("savekai_elo_min_team_players", "2");
+    g_cvar_uneven_team_mode = register_cvar("savekai_elo_uneven_team_mode", "1");
+    g_cvar_uneven_team_multiplier = register_cvar("savekai_elo_uneven_team_multiplier", "0.40");
+    g_cvar_uneven_favorite_win_multiplier = register_cvar("savekai_elo_uneven_favorite_win_multiplier", "0.25");
+    g_cvar_uneven_underdog_win_multiplier = register_cvar("savekai_elo_uneven_underdog_win_multiplier", "0.85");
+    g_cvar_uneven_underdog_loss_multiplier = register_cvar("savekai_elo_uneven_underdog_loss_multiplier", "0.25");
+    g_cvar_uneven_favorite_loss_multiplier = register_cvar("savekai_elo_uneven_favorite_loss_multiplier", "1.00");
+    g_cvar_team_size_elo_bonus = register_cvar("savekai_elo_team_size_elo_bonus", "150.0");
+    g_cvar_max_counted_team_diff = register_cvar("savekai_elo_max_counted_team_diff", "1");
     g_cvar_daily_softcap_enabled = register_cvar("savekai_elo_daily_softcap_enabled", "1");
     g_cvar_daily_softcap_1 = register_cvar("savekai_elo_daily_softcap_1", "50");
     g_cvar_daily_softcap_2 = register_cvar("savekai_elo_daily_softcap_2", "100");
@@ -238,6 +288,12 @@ public plugin_init()
     g_cvar_scoreboard_tags = register_cvar("savekai_elo_scoreboard_tags", "1");
     g_cvar_scoreboard_titles_only = register_cvar("savekai_elo_scoreboard_titles_only", "1");
     g_cvar_scoreboard_show_exact = register_cvar("savekai_elo_scoreboard_show_exact", "0");
+    g_cvar_season = register_cvar("savekai_elo_season", "0");
+    g_cvar_season_name = register_cvar("savekai_elo_season_name", "Season 0 Beta");
+    g_cvar_ignore_placement_in_team_avg = register_cvar("savekai_elo_ignore_placement_in_team_avg", "1");
+    g_cvar_rated_vs_placement_multiplier = register_cvar("savekai_elo_rated_vs_placement_multiplier", "0.25");
+    g_cvar_min_rated_enemies_for_full_elo = register_cvar("savekai_elo_min_rated_enemies_for_full_elo", "2");
+    g_cvar_placement_default_estimate = register_cvar("savekai_elo_placement_default_estimate", "1000");
 
     register_clcmd("say", "hook_say");
     register_clcmd("say_team", "hook_say");
@@ -426,11 +482,13 @@ public cmd_elo(id)
 public cmd_session(id)
 {
     new delta_text[16];
-    format_delta(g_session_delta[id], delta_text, charsmax(delta_text));
+    new gain_text[16];
+    format_delta_cents(g_session_delta_cents[id], delta_text, charsmax(delta_text));
+    format_elo_cents(g_session_gain_cents[id], gain_text, charsmax(gain_text));
 
-    client_print(id, print_chat, "[SAVEKAI ELO] Session: %s ELO | Gain: +%d | Roundai: %d | W/L: %d/%d",
+    client_print(id, print_chat, "[SAVEKAI ELO] Session: %s ELO | Gain: +%s | Roundai: %d | W/L: %d/%d",
         delta_text,
-        g_session_gain[id],
+        gain_text,
         g_session_rounds[id],
         g_session_wins[id],
         g_session_losses[id]
@@ -549,18 +607,22 @@ public concmd_resetelo(id, level, cid)
         return PLUGIN_HANDLED;
     }
 
+    new old_elo = g_elo[target];
     new start_elo = get_start_elo();
-    g_elo[target] = start_elo;
+    set_elo_cents(target, elo_to_cents(start_elo));
     g_ranked_rounds[target] = 0;
     g_wins[target] = 0;
     g_losses[target] = 0;
     g_highest_elo[target] = start_elo;
     g_daily_day[target] = get_current_day();
     g_daily_gain[target] = 0;
+    g_daily_gain_cents[target] = 0;
     g_placement_target_sum[target] = 0.0;
     g_placement_weight_sum[target] = 0.0;
     g_session_delta[target] = 0;
     g_session_gain[target] = 0;
+    g_session_delta_cents[target] = 0;
+    g_session_gain_cents[target] = 0;
     g_session_placement_target_sum[target] = 0.0;
     g_session_placement_weight_sum[target] = 0.0;
     g_session_rounds[target] = 0;
@@ -569,7 +631,7 @@ public concmd_resetelo(id, level, cid)
 
     save_player(target, true);
     update_scoreboard_tag(target);
-    announce_admin_change(id, target, "reset", start_elo, 0);
+    announce_admin_change(id, target, "reset", old_elo, start_elo);
     return PLUGIN_HANDLED;
 }
 
@@ -819,6 +881,7 @@ stock snapshot_round_players()
         g_round_eligible[id] = true;
         g_round_team[id] = team;
         g_round_elo[id] = g_elo[id];
+        g_round_elo_cents[id] = g_elo_cents[id];
     }
 
     g_round_snapshot_valid = true;
@@ -849,7 +912,9 @@ stock process_round_elo()
     }
 
     new t_count, ct_count, total_count;
-    new t_sum, ct_sum;
+    new t_sum_cents, ct_sum_cents;
+    new t_rated_count, ct_rated_count;
+    new t_rated_sum_cents, ct_rated_sum_cents;
 
     for (new id = 1; id <= MAX_CLIENTS; id++)
     {
@@ -861,15 +926,29 @@ stock process_round_elo()
 
         total_count++;
 
+        new bool:player_rated = !is_in_placement(id);
+
         if (g_round_team[id] == TEAM_T)
         {
             t_count++;
-            t_sum += g_round_elo[id];
+            t_sum_cents += g_round_elo_cents[id];
+
+            if (player_rated)
+            {
+                t_rated_count++;
+                t_rated_sum_cents += g_round_elo_cents[id];
+            }
         }
         else if (g_round_team[id] == TEAM_CT)
         {
             ct_count++;
-            ct_sum += g_round_elo[id];
+            ct_sum_cents += g_round_elo_cents[id];
+
+            if (player_rated)
+            {
+                ct_rated_count++;
+                ct_rated_sum_cents += g_round_elo_cents[id];
+            }
         }
     }
 
@@ -888,19 +967,37 @@ stock process_round_elo()
     }
 
     new team_diff = abs(t_count - ct_count);
-    new max_team_diff = get_max_team_diff();
+    new max_counted_team_diff = get_max_counted_team_diff();
 
-    if (max_team_diff >= 0 && team_diff > max_team_diff)
+    if (team_diff > 0 && !get_pcvar_num(g_cvar_uneven_team_mode))
+    {
+        log_elo_round_skip("uneven teams disabled");
+        reset_round_snapshot();
+        return;
+    }
+
+    if (max_counted_team_diff >= 0 && team_diff > max_counted_team_diff)
     {
         log_elo_round_skip("team size difference too high");
         reset_round_snapshot();
         return;
     }
 
-    new Float:t_avg = float(t_sum) / float(t_count);
-    new Float:ct_avg = float(ct_sum) / float(ct_count);
+    new Float:t_avg = float(t_sum_cents) / float(ELO_SCALE) / float(t_count);
+    new Float:ct_avg = float(ct_sum_cents) / float(ELO_SCALE) / float(ct_count);
+    new bool:ignore_placement_avg = get_pcvar_num(g_cvar_ignore_placement_in_team_avg) != 0;
+    new Float:default_estimate = float(get_pcvar_num(g_cvar_placement_default_estimate));
+    new Float:t_rated_avg = t_rated_count > 0 ? (float(t_rated_sum_cents) / float(ELO_SCALE) / float(t_rated_count)) : default_estimate;
+    new Float:ct_rated_avg = ct_rated_count > 0 ? (float(ct_rated_sum_cents) / float(ELO_SCALE) / float(ct_rated_count)) : default_estimate;
+    new Float:placement_t_avg = t_avg;
+    new Float:placement_ct_avg = ct_avg;
+    new placement_ignored_count = (t_count - t_rated_count) + (ct_count - ct_rated_count);
+    new Float:effective_t_avg = ignore_placement_avg ? t_rated_avg : t_avg;
+    new Float:effective_ct_avg = ignore_placement_avg ? ct_rated_avg : ct_avg;
     new Float:map_multiplier = get_map_multiplier();
     new Float:player_multiplier = get_player_count_multiplier(total_count);
+    new Float:uneven_multiplier = get_uneven_team_multiplier(team_diff);
+    new Float:size_bonus_applied = apply_team_size_bonus(t_count, ct_count, effective_t_avg, effective_ct_avg);
     new bool:testmode = get_pcvar_num(g_cvar_testmode) != 0;
     new winner_text[4];
 
@@ -914,23 +1011,38 @@ stock process_round_elo()
     }
 
     new map_name[32];
+    new season_name[48];
     get_mapname(map_name, charsmax(map_name));
+    get_pcvar_string(g_cvar_season_name, season_name, charsmax(season_name));
+    sanitize_name(season_name, charsmax(season_name));
 
     if (get_pcvar_num(g_cvar_log_enabled))
     {
         log_to_file("savekai_elo.log",
-            "Round map=%s mode=%d winner=%s total=%d T=%d CT=%d T_avg=%.1f CT_avg=%.1f map_mult=%.2f player_mult=%.2f testmode=%d",
+            "Round season=%d season_name=%s map=%s mode=%d winner=%s total=%d T=%d CT=%d team_size_diff=%d T_avg=%.1f CT_avg=%.1f effective_T_avg=%.1f effective_CT_avg=%.1f map_mult=%.2f player_mult=%.2f uneven_mult=%.2f team_size_bonus=%.1f testmode=%d T_rated=%d CT_rated=%d placement_players_ignored=%d ignore_placement=%d rated_default_estimate=%.0f",
+            get_pcvar_num(g_cvar_season),
+            season_name,
             map_name,
             get_savekai_current_mode(),
             winner_text,
             total_count,
             t_count,
             ct_count,
+            team_diff,
             t_avg,
             ct_avg,
+            effective_t_avg,
+            effective_ct_avg,
             map_multiplier,
             player_multiplier,
-            testmode ? 1 : 0
+            uneven_multiplier,
+            size_bonus_applied,
+            testmode ? 1 : 0,
+            t_rated_count,
+            ct_rated_count,
+            placement_ignored_count,
+            ignore_placement_avg ? 1 : 0,
+            default_estimate
         );
     }
 
@@ -943,60 +1055,125 @@ stock process_round_elo()
             continue;
         }
 
-        apply_round_delta(id, t_avg, ct_avg, map_multiplier, player_multiplier, testmode);
+        apply_round_delta(id, effective_t_avg, effective_ct_avg, map_multiplier, player_multiplier, testmode, t_count, ct_count, team_diff, t_rated_count, ct_rated_count, placement_ignored_count, placement_t_avg, placement_ct_avg);
     }
 
     reset_round_snapshot();
 }
 
-stock apply_round_delta(id, Float:t_avg, Float:ct_avg, Float:map_multiplier, Float:player_multiplier, bool:testmode)
+stock apply_round_delta(id, Float:t_avg, Float:ct_avg, Float:map_multiplier, Float:player_multiplier, bool:testmode, t_count, ct_count, team_diff, t_rated_count, ct_rated_count, placement_ignored_count, Float:placement_t_avg, Float:placement_ct_avg)
 {
     new old_elo = g_elo[id];
+    new old_elo_cents = g_elo_cents[id];
     new team = g_round_team[id];
     new bool:won = team == g_round_winner;
     new bool:placement = is_in_placement(id);
     new bool:save_test_placement = should_save_testmode_placement(placement, testmode);
+    new bool:smaller_team = is_player_on_smaller_team(team, t_count, ct_count);
+    new Float:uneven_multiplier = get_uneven_result_multiplier(team_diff, smaller_team, won);
 
     new Float:own_avg = team == TEAM_T ? t_avg : ct_avg;
     new Float:enemy_avg = team == TEAM_T ? ct_avg : t_avg;
+    new own_rated_count = team == TEAM_T ? t_rated_count : ct_rated_count;
+    new enemy_rated_count = team == TEAM_T ? ct_rated_count : t_rated_count;
+    new Float:enemy_placement_avg = team == TEAM_T ? placement_ct_avg : placement_t_avg;
+    new Float:rated_vs_placement_multiplier = 1.0;
+
+    if (!placement && get_pcvar_num(g_cvar_ignore_placement_in_team_avg)
+        && enemy_rated_count < get_pcvar_num(g_cvar_min_rated_enemies_for_full_elo))
+    {
+        rated_vs_placement_multiplier = get_pcvar_float(g_cvar_rated_vs_placement_multiplier);
+
+        if (rated_vs_placement_multiplier < 0.0)
+        {
+            rated_vs_placement_multiplier = 0.0;
+        }
+    }
+
     new Float:expected = calculate_expected_score(own_avg, enemy_avg);
     new Float:result = won ? 1.0 : 0.0;
     new Float:k = get_k_coefficient(old_elo, g_ranked_rounds[id]);
     new Float:base_delta = k * (result - expected);
     new Float:perf_delta = get_performance_modifier(id, placement);
-    new Float:placement_weight = map_multiplier * player_multiplier;
-    new Float:raw_delta = (base_delta + perf_delta) * map_multiplier * player_multiplier;
-    new delta = floatround(raw_delta);
-    new before_softcap = delta;
+    new Float:placement_weight = 1.0;
+    new Float:raw_delta = (base_delta + perf_delta) * map_multiplier * player_multiplier * uneven_multiplier * rated_vs_placement_multiplier;
+    new delta_cents = floatround(raw_delta * float(ELO_SCALE));
+    new before_softcap_cents = delta_cents;
     new Float:daily_multiplier = 1.0;
     new placement_target = 0;
+
+    if (get_pcvar_num(g_cvar_placement_weight_multipliers))
+    {
+        placement_weight = map_multiplier * player_multiplier * uneven_multiplier;
+    }
 
     if (placement_weight < 0.0)
     {
         placement_weight = 0.0;
     }
 
-    delta = cap_round_delta(delta);
-    delta = apply_win_loss_bounds(won, delta);
-    delta = apply_daily_softcap(id, delta, daily_multiplier);
+    if (!get_pcvar_num(g_cvar_fractional_enabled))
+    {
+        delta_cents = elo_to_cents(floatround(raw_delta));
+    }
 
-    new new_elo = old_elo + delta;
+    delta_cents = cap_round_delta_cents(delta_cents);
+    delta_cents = apply_win_loss_bounds_cents(won, delta_cents);
+    delta_cents = apply_daily_softcap_cents(id, delta_cents, daily_multiplier);
+
+    new delta_before_carry_cents = delta_cents;
+    new bool:carry_applied = false;
+    delta_cents = apply_carry_protection_cents(id, won, smaller_team, delta_cents, carry_applied);
+
+    new new_elo_cents = old_elo_cents + delta_cents;
 
     if (placement)
     {
         placement_target = calculate_placement_target(enemy_avg, won, perf_delta);
-        new_elo = calculate_placement_estimate(id, placement_target, placement_weight, testmode && !save_test_placement);
+
+        /*
+         * Keep live placement ELO moving round-by-round. The weighted placement
+         * estimate is still collected, but only becomes authoritative when the
+         * placement period finishes. This avoids the visible "snap back to the
+         * same ELO" problem while a player is still in placement.
+         */
+        if ((g_ranked_rounds[id] + 1) >= get_placement_rounds())
+        {
+            new_elo_cents = elo_to_cents(calculate_placement_estimate(id, placement_target, placement_weight, testmode && !save_test_placement));
+        }
+        else
+        {
+            new_elo_cents = clamp_elo_cents_to_placement(new_elo_cents);
+        }
     }
-    else if (new_elo < 0)
+    else if (new_elo_cents < 0)
     {
-        new_elo = 0;
+        new_elo_cents = 0;
     }
 
-    g_session_delta[id] += delta;
-    if (delta > 0)
+    if (!won && new_elo_cents > old_elo_cents)
     {
-        g_session_gain[id] += delta;
-        update_daily_gain(id, delta);
+        new_elo_cents = old_elo_cents;
+    }
+    else if (won && get_pcvar_num(g_cvar_won_round_min_delta) >= 0 && new_elo_cents < old_elo_cents)
+    {
+        new_elo_cents = old_elo_cents;
+    }
+
+    new applied_delta_cents = new_elo_cents - old_elo_cents;
+    new applied_delta = cents_to_elo_trunc(applied_delta_cents);
+
+    g_session_delta[id] += applied_delta;
+    g_session_delta_cents[id] += applied_delta_cents;
+    if (applied_delta_cents > 0)
+    {
+        g_session_gain[id] += applied_delta;
+        g_session_gain_cents[id] += applied_delta_cents;
+
+        if (!testmode)
+        {
+            update_daily_gain_cents(id, applied_delta_cents);
+        }
     }
 
     g_session_rounds[id]++;
@@ -1024,7 +1201,7 @@ stock apply_round_delta(id, Float:t_avg, Float:ct_avg, Float:map_multiplier, Flo
             g_placement_weight_sum[id] += placement_weight;
         }
 
-        g_elo[id] = new_elo;
+        set_elo_cents(id, new_elo_cents);
 
         if (!testmode)
         {
@@ -1057,46 +1234,68 @@ stock apply_round_delta(id, Float:t_avg, Float:ct_avg, Float:map_multiplier, Flo
         save_player(id, false);
     }
 
-    print_round_delta(id, old_elo, new_elo, delta, expected, k, perf_delta, placement, testmode);
-    log_round_delta(id, old_elo, new_elo, delta, before_softcap, expected, k, base_delta, perf_delta, daily_multiplier, placement, placement_target, placement_weight, testmode);
+    print_round_delta(id, old_elo_cents, new_elo_cents, applied_delta_cents, expected, k, perf_delta, placement, testmode);
+    log_round_delta(id, old_elo_cents, new_elo_cents, applied_delta_cents, before_softcap_cents, delta_before_carry_cents, expected, k, base_delta, perf_delta, daily_multiplier, placement, placement_target, placement_weight, testmode, team_diff, uneven_multiplier, t_avg, ct_avg, smaller_team, carry_applied, own_rated_count, enemy_rated_count, placement_ignored_count, rated_vs_placement_multiplier, enemy_avg, enemy_placement_avg);
     update_scoreboard_tag(id);
 }
 
-stock print_round_delta(id, old_elo, new_elo, delta, Float:expected, Float:k, Float:perf_delta, bool:placement, bool:testmode)
+stock print_round_delta(id, old_elo_cents, new_elo_cents, delta_cents, Float:expected, Float:k, Float:perf_delta, bool:placement, bool:testmode)
 {
     if (!get_pcvar_num(g_cvar_show_round_delta))
     {
         return;
     }
 
-    new delta_text[16];
-    new old_rank[48], new_rank[48];
-    format_delta(delta, delta_text, charsmax(delta_text));
-    get_rank_title_by_elo(old_elo, old_rank, charsmax(old_rank));
-    get_rank_title_by_elo(new_elo, new_rank, charsmax(new_rank));
+    new delta_text[16], old_elo_text[16], new_elo_text[16];
+    format_delta_cents(delta_cents, delta_text, charsmax(delta_text));
+    format_elo_cents(old_elo_cents, old_elo_text, charsmax(old_elo_text));
+    format_elo_cents(new_elo_cents, new_elo_text, charsmax(new_elo_text));
 
-    if (testmode)
+    if (placement)
     {
-        client_print(id, print_chat, "[SAVEKAI ELO] Test mode: %s ELO butu pritaikyta, bet nesaugoma.", delta_text);
+        if (g_ranked_rounds[id] >= get_placement_rounds())
+        {
+            client_print(id, print_chat, "[SAVEKAI ELO] Placement baigtas: %s | %s -> %s.",
+                delta_text,
+                old_elo_text,
+                new_elo_text
+            );
+        }
+        else
+        {
+            client_print(id, print_chat, "[SAVEKAI ELO] Placement: %s | %s -> %s | %d/%d roundu.",
+                delta_text,
+                old_elo_text,
+                new_elo_text,
+                g_ranked_rounds[id],
+                get_placement_rounds()
+            );
+        }
+
+        if (testmode)
+        {
+            client_print(id, print_chat, "[SAVEKAI ELO] Test mode: placement ELO nesaugomas kaip official ELO.");
+        }
 
         if (get_pcvar_num(g_cvar_debug_chat))
         {
-            client_print(id, print_chat, "[SAVEKAI ELO] Old %d -> New %d | Exp %.2f | K %.1f | Perf %.2f", old_elo, new_elo, expected, k, perf_delta);
+            client_print(id, print_chat, "[SAVEKAI ELO] Exp %.2f | K %.1f | Perf %.2f", expected, k, perf_delta);
         }
 
-        if (placement)
+        return;
+    }
+
+    if (testmode)
+    {
+        client_print(id, print_chat, "[SAVEKAI ELO] Test mode: %s ELO | %s -> %s butu pritaikyta, bet nesaugoma.",
+            delta_text,
+            old_elo_text,
+            new_elo_text
+        );
+
+        if (get_pcvar_num(g_cvar_debug_chat))
         {
-            new placement_rounds = g_ranked_rounds[id];
-
-            if (!get_pcvar_num(g_cvar_testmode_save_placement))
-            {
-                placement_rounds += g_session_rounds[id];
-            }
-
-            client_print(id, print_chat, "[SAVEKAI ELO] Placement estimate: %d/%d roundu.",
-                placement_rounds,
-                get_placement_rounds()
-            );
+            client_print(id, print_chat, "[SAVEKAI ELO] Old %s -> New %s | Exp %.2f | K %.1f | Perf %.2f", old_elo_text, new_elo_text, expected, k, perf_delta);
         }
 
         return;
@@ -1104,30 +1303,35 @@ stock print_round_delta(id, old_elo, new_elo, delta, Float:expected, Float:k, Fl
 
     client_print(id, print_chat, "[SAVEKAI ELO] %s ELO | %s -> %s",
         delta_text,
-        old_rank,
-        new_rank
+        old_elo_text,
+        new_elo_text
     );
 
     if (get_pcvar_num(g_cvar_debug_chat))
     {
-        client_print(id, print_chat, "[SAVEKAI ELO] Old %d -> New %d | Exp %.2f | K %.1f | Perf %.2f", old_elo, new_elo, expected, k, perf_delta);
+        client_print(id, print_chat, "[SAVEKAI ELO] Old %s -> New %s | Exp %.2f | K %.1f | Perf %.2f", old_elo_text, new_elo_text, expected, k, perf_delta);
     }
 }
 
-stock log_round_delta(id, old_elo, new_elo, delta, before_softcap, Float:expected, Float:k, Float:base_delta, Float:perf_delta, Float:daily_multiplier, bool:placement, placement_target, Float:placement_weight, bool:testmode)
+stock log_round_delta(id, old_elo_cents, new_elo_cents, delta_cents, before_softcap_cents, delta_before_carry_cents, Float:expected, Float:k, Float:base_delta, Float:perf_delta, Float:daily_multiplier, bool:placement, placement_target, Float:placement_weight, bool:testmode, team_diff, Float:uneven_multiplier, Float:effective_t_avg, Float:effective_ct_avg, bool:smaller_team, bool:carry_applied, own_rated_count, enemy_rated_count, placement_ignored_count, Float:rated_vs_placement_multiplier, Float:rated_avg_used, Float:placement_avg_used)
 {
     if (!get_pcvar_num(g_cvar_log_enabled))
     {
         return;
     }
 
-    new name[NAME_LEN], delta_text[16], old_rank[48], new_rank[48];
+    new name[NAME_LEN], delta_text[16], old_elo_text[16], new_elo_text[16];
+    new before_softcap_text[16], delta_before_carry_text[16], old_rank[48], new_rank[48];
     new team_text[4];
     get_user_name(id, name, charsmax(name));
     sanitize_name(name, charsmax(name));
-    format_delta(delta, delta_text, charsmax(delta_text));
-    get_rank_title_by_elo(old_elo, old_rank, charsmax(old_rank));
-    get_rank_title_by_elo(new_elo, new_rank, charsmax(new_rank));
+    format_delta_cents(delta_cents, delta_text, charsmax(delta_text));
+    format_elo_cents(old_elo_cents, old_elo_text, charsmax(old_elo_text));
+    format_elo_cents(new_elo_cents, new_elo_text, charsmax(new_elo_text));
+    format_delta_cents(before_softcap_cents, before_softcap_text, charsmax(before_softcap_text));
+    format_delta_cents(delta_before_carry_cents, delta_before_carry_text, charsmax(delta_before_carry_text));
+    get_rank_title_by_elo(cents_to_elo_floor(old_elo_cents), old_rank, charsmax(old_rank));
+    get_rank_title_by_elo(cents_to_elo_floor(new_elo_cents), new_rank, charsmax(new_rank));
 
     if (g_round_team[id] == TEAM_T)
     {
@@ -1139,14 +1343,16 @@ stock log_round_delta(id, old_elo, new_elo, delta, before_softcap, Float:expecte
     }
 
     log_to_file("savekai_elo.log",
-        "%s auth=%s team=%s old=%d new=%d delta=%s before_softcap=%d expected=%.2f k=%.1f base=%.2f perf=%.2f daily_mult=%.2f placement=%d placement_target=%d placement_weight=%.2f kills=%d deaths=%d damage=%d mvp=%d plant=%d defuse=%d tk=%d suicide=%d clutch=%d old_rank=%s new_rank=%s testmode=%d",
+        "%s auth=%s team=%s old=%s new=%s delta=%s old_delta=%s new_delta=%s before_softcap=%s expected=%.2f k=%.1f base=%.2f perf=%.2f daily_mult=%.2f placement=%d target=%d weight=%.2f testmode=%d",
         name,
         g_authid[id],
         team_text,
-        old_elo,
-        new_elo,
+        old_elo_text,
+        new_elo_text,
         delta_text,
-        before_softcap,
+        delta_before_carry_text,
+        delta_text,
+        before_softcap_text,
         expected,
         k,
         base_delta,
@@ -1155,6 +1361,18 @@ stock log_round_delta(id, old_elo, new_elo, delta, before_softcap, Float:expecte
         placement ? 1 : 0,
         placement_target,
         placement_weight,
+        testmode ? 1 : 0
+    );
+
+    log_to_file("savekai_elo.log",
+        "DETAIL auth=%s team_size_diff=%d uneven_mult=%.2f effective_T_avg=%.1f effective_CT_avg=%.1f player_is_smaller_team=%d carry_protection_applied=%d kills=%d deaths=%d damage=%d mvp=%d plant=%d defuse=%d tk=%d suicide=%d clutch=%d old_rank=%s new_rank=%s own_rated_count=%d enemy_rated_count=%d placement_players_ignored=%d rated_vs_placement_multiplier=%.2f rated_avg_used=%.1f placement_avg_used=%.1f",
+        g_authid[id],
+        team_diff,
+        uneven_multiplier,
+        effective_t_avg,
+        effective_ct_avg,
+        smaller_team ? 1 : 0,
+        carry_applied ? 1 : 0,
         g_round_kills[id],
         g_round_deaths[id],
         g_round_damage[id],
@@ -1166,7 +1384,12 @@ stock log_round_delta(id, old_elo, new_elo, delta, before_softcap, Float:expecte
         g_round_clutch[id],
         old_rank,
         new_rank,
-        testmode ? 1 : 0
+        own_rated_count,
+        enemy_rated_count,
+        placement_ignored_count,
+        rated_vs_placement_multiplier,
+        rated_avg_used,
+        placement_avg_used
     );
 }
 
@@ -1342,7 +1565,7 @@ stock Float:get_k_coefficient(elo, ranked_rounds)
         return get_pcvar_float(g_cvar_k_placement);
     }
 
-    if (ranked_rounds < 100)
+    if (ranked_rounds < get_provisional_rounds())
     {
         return get_pcvar_float(g_cvar_k_provisional);
     }
@@ -1466,6 +1689,179 @@ stock apply_win_loss_bounds(bool:won, delta)
     return delta;
 }
 
+stock apply_win_loss_bounds_cents(bool:won, delta_cents)
+{
+    if (won)
+    {
+        new min_win_cents = floatround(get_pcvar_float(g_cvar_won_round_min_delta) * float(ELO_SCALE));
+
+        if (delta_cents < min_win_cents)
+        {
+            return min_win_cents;
+        }
+    }
+    else
+    {
+        new max_loss_cents = floatround(get_pcvar_float(g_cvar_lost_round_max_delta) * float(ELO_SCALE));
+
+        if (delta_cents > max_loss_cents)
+        {
+            return max_loss_cents;
+        }
+    }
+
+    return delta_cents;
+}
+
+stock apply_carry_protection(id, bool:won, bool:smaller_team, delta, &bool:carry_applied)
+{
+    carry_applied = false;
+
+    if (won || !get_pcvar_num(g_cvar_perf_carry_protection))
+    {
+        return delta;
+    }
+
+    if (delta > 0)
+    {
+        delta = 0;
+    }
+
+    new carry_kills = get_pcvar_num(g_cvar_perf_carry_kills);
+    new carry_damage = get_pcvar_num(g_cvar_perf_carry_damage);
+    new hardcarry_kills = get_pcvar_num(g_cvar_perf_hardcarry_kills);
+    new hardcarry_damage = get_pcvar_num(g_cvar_perf_hardcarry_damage);
+    new carry_loss_cap = normalize_loss_cap(get_pcvar_num(g_cvar_perf_carry_loss_cap));
+    new hardcarry_loss_cap = normalize_loss_cap(get_pcvar_num(g_cvar_perf_hardcarry_loss_cap));
+
+    if (carry_kills < 1)
+    {
+        carry_kills = 1;
+    }
+
+    if (hardcarry_kills < 1)
+    {
+        hardcarry_kills = carry_kills;
+    }
+
+    if (carry_damage < 0)
+    {
+        carry_damage = 0;
+    }
+
+    if (hardcarry_damage < 0)
+    {
+        hardcarry_damage = carry_damage;
+    }
+
+    if (smaller_team && g_round_kills[id] >= carry_kills)
+    {
+        carry_applied = true;
+        return max_int(delta, hardcarry_loss_cap);
+    }
+
+    if (g_round_kills[id] >= hardcarry_kills && g_round_damage[id] >= hardcarry_damage)
+    {
+        carry_applied = true;
+        return max_int(delta, hardcarry_loss_cap);
+    }
+
+    if (g_round_kills[id] >= carry_kills)
+    {
+        carry_applied = true;
+        return max_int(delta, carry_loss_cap);
+    }
+
+    return delta;
+}
+
+stock apply_carry_protection_cents(id, bool:won, bool:smaller_team, delta_cents, &bool:carry_applied)
+{
+    carry_applied = false;
+
+    if (won || !get_pcvar_num(g_cvar_perf_carry_protection))
+    {
+        return delta_cents;
+    }
+
+    if (delta_cents > 0)
+    {
+        delta_cents = 0;
+    }
+
+    new carry_kills = get_pcvar_num(g_cvar_perf_carry_kills);
+    new carry_damage = get_pcvar_num(g_cvar_perf_carry_damage);
+    new hardcarry_kills = get_pcvar_num(g_cvar_perf_hardcarry_kills);
+    new hardcarry_damage = get_pcvar_num(g_cvar_perf_hardcarry_damage);
+    new carry_loss_cap_cents = normalize_loss_cap_cents(get_pcvar_float(g_cvar_perf_carry_loss_cap));
+    new hardcarry_loss_cap_cents = normalize_loss_cap_cents(get_pcvar_float(g_cvar_perf_hardcarry_loss_cap));
+
+    if (carry_kills < 1)
+    {
+        carry_kills = 1;
+    }
+
+    if (hardcarry_kills < 1)
+    {
+        hardcarry_kills = carry_kills;
+    }
+
+    if (carry_damage < 0)
+    {
+        carry_damage = 0;
+    }
+
+    if (hardcarry_damage < 0)
+    {
+        hardcarry_damage = carry_damage;
+    }
+
+    if (smaller_team && g_round_kills[id] >= carry_kills)
+    {
+        carry_applied = true;
+        return max_int(delta_cents, hardcarry_loss_cap_cents);
+    }
+
+    if (g_round_kills[id] >= hardcarry_kills && g_round_damage[id] >= hardcarry_damage)
+    {
+        carry_applied = true;
+        return max_int(delta_cents, hardcarry_loss_cap_cents);
+    }
+
+    if (g_round_kills[id] >= carry_kills)
+    {
+        carry_applied = true;
+        return max_int(delta_cents, carry_loss_cap_cents);
+    }
+
+    return delta_cents;
+}
+
+stock normalize_loss_cap(cap)
+{
+    if (cap > 0)
+    {
+        cap = 0;
+    }
+
+    return cap;
+}
+
+stock normalize_loss_cap_cents(Float:cap)
+{
+    if (cap > 0.0)
+    {
+        cap = 0.0;
+    }
+
+    return floatround(cap * float(ELO_SCALE));
+}
+
+stock max_int(a, b)
+{
+    return a > b ? a : b;
+}
+
 stock calculate_placement_target(Float:enemy_avg, bool:won, Float:perf_delta)
 {
     new Float:target = enemy_avg;
@@ -1551,6 +1947,41 @@ stock apply_daily_softcap(id, delta, &Float:effective_multiplier)
     return adjusted_delta;
 }
 
+stock apply_daily_softcap_cents(id, delta_cents, &Float:effective_multiplier)
+{
+    effective_multiplier = 1.0;
+
+    if (delta_cents <= 0 || !get_pcvar_num(g_cvar_daily_softcap_enabled))
+    {
+        return delta_cents;
+    }
+
+    refresh_daily_window(id);
+
+    new original_delta_cents = delta_cents;
+    new remaining_cents = delta_cents;
+    new current_gain_cents = g_daily_gain_cents[id];
+    new Float:adjusted = 0.0;
+
+    adjusted += consume_daily_tier_cents(remaining_cents, current_gain_cents, get_pcvar_num(g_cvar_daily_softcap_1), get_pcvar_float(g_cvar_daily_mult_1));
+    adjusted += consume_daily_tier_cents(remaining_cents, current_gain_cents, get_pcvar_num(g_cvar_daily_softcap_2), get_pcvar_float(g_cvar_daily_mult_2));
+    adjusted += consume_daily_tier_cents(remaining_cents, current_gain_cents, get_pcvar_num(g_cvar_daily_softcap_3), get_pcvar_float(g_cvar_daily_mult_3));
+
+    if (remaining_cents > 0)
+    {
+        adjusted += float(remaining_cents) * get_pcvar_float(g_cvar_daily_mult_4);
+    }
+
+    new adjusted_delta_cents = floatround(adjusted);
+
+    if (original_delta_cents > 0)
+    {
+        effective_multiplier = float(adjusted_delta_cents) / float(original_delta_cents);
+    }
+
+    return adjusted_delta_cents;
+}
+
 stock Float:consume_daily_tier(&remaining, &current_gain, tier_limit, Float:multiplier)
 {
     if (remaining <= 0)
@@ -1575,6 +2006,32 @@ stock Float:consume_daily_tier(&remaining, &current_gain, tier_limit, Float:mult
     return float(available) * multiplier;
 }
 
+stock Float:consume_daily_tier_cents(&remaining_cents, &current_gain_cents, tier_limit, Float:multiplier)
+{
+    if (remaining_cents <= 0)
+    {
+        return 0.0;
+    }
+
+    new tier_limit_cents = elo_to_cents(tier_limit);
+
+    if (tier_limit_cents <= current_gain_cents)
+    {
+        return 0.0;
+    }
+
+    new available_cents = tier_limit_cents - current_gain_cents;
+
+    if (available_cents > remaining_cents)
+    {
+        available_cents = remaining_cents;
+    }
+
+    remaining_cents -= available_cents;
+    current_gain_cents += available_cents;
+    return float(available_cents) * multiplier;
+}
+
 stock update_daily_gain(id, delta)
 {
     if (delta <= 0)
@@ -1584,6 +2041,18 @@ stock update_daily_gain(id, delta)
 
     refresh_daily_window(id);
     g_daily_gain[id] += delta;
+}
+
+stock update_daily_gain_cents(id, delta_cents)
+{
+    if (delta_cents <= 0)
+    {
+        return;
+    }
+
+    refresh_daily_window(id);
+    g_daily_gain_cents[id] += delta_cents;
+    g_daily_gain[id] = cents_to_elo_floor(g_daily_gain_cents[id]);
 }
 
 stock get_effective_daily_gain(id)
@@ -1601,6 +2070,7 @@ stock refresh_daily_window(id)
     {
         g_daily_day[id] = today;
         g_daily_gain[id] = 0;
+        g_daily_gain_cents[id] = 0;
     }
 }
 
@@ -1672,6 +2142,19 @@ stock get_placement_min_rounds()
     }
 
     return min_rounds;
+}
+
+stock get_provisional_rounds()
+{
+    new provisional_rounds = get_pcvar_num(g_cvar_provisional_rounds);
+    new placement_rounds = get_placement_rounds();
+
+    if (provisional_rounds < placement_rounds)
+    {
+        provisional_rounds = placement_rounds;
+    }
+
+    return provisional_rounds;
 }
 
 stock clamp_placement_elo(elo)
@@ -1849,6 +2332,34 @@ stock cap_round_delta(delta)
     return delta;
 }
 
+stock cap_round_delta_cents(delta_cents)
+{
+    new max_gain_cents = floatround(get_pcvar_float(g_cvar_max_gain_round) * float(ELO_SCALE));
+    new max_loss_cents = floatround(get_pcvar_float(g_cvar_max_loss_round) * float(ELO_SCALE));
+
+    if (max_gain_cents < ELO_SCALE)
+    {
+        max_gain_cents = ELO_SCALE;
+    }
+
+    if (max_loss_cents < ELO_SCALE)
+    {
+        max_loss_cents = ELO_SCALE;
+    }
+
+    if (delta_cents > max_gain_cents)
+    {
+        return max_gain_cents;
+    }
+
+    if (delta_cents < -max_loss_cents)
+    {
+        return -max_loss_cents;
+    }
+
+    return delta_cents;
+}
+
 stock get_min_players()
 {
     new min_players = get_pcvar_num(g_cvar_min_players);
@@ -1876,6 +2387,125 @@ stock get_min_team_players()
 stock get_max_team_diff()
 {
     return get_pcvar_num(g_cvar_max_team_diff);
+}
+
+stock get_max_counted_team_diff()
+{
+    new max_counted_team_diff = get_pcvar_num(g_cvar_max_counted_team_diff);
+    new legacy_max_team_diff = get_max_team_diff();
+
+    if (legacy_max_team_diff >= 0 && legacy_max_team_diff < max_counted_team_diff)
+    {
+        max_counted_team_diff = legacy_max_team_diff;
+    }
+
+    return max_counted_team_diff;
+}
+
+stock Float:get_uneven_team_multiplier(team_diff)
+{
+    if (team_diff <= 0)
+    {
+        return 1.0;
+    }
+
+    new Float:multiplier = get_pcvar_float(g_cvar_uneven_team_multiplier);
+
+    if (multiplier < 0.0)
+    {
+        multiplier = 0.0;
+    }
+
+    if (multiplier > 1.0)
+    {
+        multiplier = 1.0;
+    }
+
+    return multiplier;
+}
+
+stock Float:get_uneven_result_multiplier(team_diff, bool:smaller_team, bool:won)
+{
+    if (team_diff <= 0)
+    {
+        return 1.0;
+    }
+
+    if (won)
+    {
+        if (smaller_team)
+        {
+            return clamp_multiplier(get_pcvar_float(g_cvar_uneven_underdog_win_multiplier));
+        }
+
+        return clamp_multiplier(get_pcvar_float(g_cvar_uneven_favorite_win_multiplier));
+    }
+
+    if (smaller_team)
+    {
+        return clamp_multiplier(get_pcvar_float(g_cvar_uneven_underdog_loss_multiplier));
+    }
+
+    return clamp_multiplier(get_pcvar_float(g_cvar_uneven_favorite_loss_multiplier));
+}
+
+stock Float:clamp_multiplier(Float:multiplier)
+{
+    if (multiplier < 0.0)
+    {
+        multiplier = 0.0;
+    }
+
+    if (multiplier > 1.0)
+    {
+        multiplier = 1.0;
+    }
+
+    return multiplier;
+}
+
+stock Float:apply_team_size_bonus(t_count, ct_count, &Float:effective_t_avg, &Float:effective_ct_avg)
+{
+    if (t_count == ct_count)
+    {
+        return 0.0;
+    }
+
+    new Float:bonus = get_pcvar_float(g_cvar_team_size_elo_bonus);
+
+    if (bonus < 0.0)
+    {
+        bonus = 0.0;
+    }
+
+    if (t_count > ct_count)
+    {
+        effective_t_avg += bonus;
+        return bonus;
+    }
+
+    effective_ct_avg += bonus;
+    return bonus;
+}
+
+stock bool:is_player_on_smaller_team(team, t_count, ct_count)
+{
+    if (t_count == ct_count)
+    {
+        return false;
+    }
+
+    if (team == TEAM_T)
+    {
+        return t_count < ct_count;
+    }
+
+    if (team == TEAM_CT)
+    {
+        return ct_count < t_count;
+    }
+
+    return false;
 }
 
 stock get_savekai_current_mode()
@@ -1933,7 +2563,7 @@ stock load_player(id)
     }
 
     new start_elo = get_start_elo();
-    g_elo[id] = start_elo;
+    set_elo_cents(id, elo_to_cents(start_elo));
     g_ranked_rounds[id] = 0;
     g_wins[id] = 0;
     g_losses[id] = 0;
@@ -1941,6 +2571,7 @@ stock load_player(id)
     g_last_seen[id] = get_systime();
     g_daily_day[id] = get_current_day();
     g_daily_gain[id] = 0;
+    g_daily_gain_cents[id] = 0;
     g_placement_target_sum[id] = 0.0;
     g_placement_weight_sum[id] = 0.0;
 
@@ -1952,12 +2583,12 @@ stock load_player(id)
 
     if (g_vault != INVALID_VAULT)
     {
-        new loaded_name[NAME_LEN], elo, rounds, wins, losses, highest, last_seen, daily_day, daily_gain;
+        new loaded_name[NAME_LEN], elo, elo_cents, rounds, wins, losses, highest, last_seen, daily_day, daily_gain, daily_gain_cents;
         new Float:placement_sum, Float:placement_weight;
 
-        if (load_elo_by_authid(g_authid[id], elo, rounds, wins, losses, highest, loaded_name, charsmax(loaded_name), last_seen, daily_day, daily_gain, placement_sum, placement_weight))
+        if (load_elo_by_authid(g_authid[id], elo, elo_cents, rounds, wins, losses, highest, loaded_name, charsmax(loaded_name), last_seen, daily_day, daily_gain, daily_gain_cents, placement_sum, placement_weight))
         {
-            g_elo[id] = elo;
+            set_elo_cents(id, elo_cents);
             g_ranked_rounds[id] = rounds;
             g_wins[id] = wins;
             g_losses[id] = losses;
@@ -1965,6 +2596,7 @@ stock load_player(id)
             g_last_seen[id] = last_seen;
             g_daily_day[id] = daily_day;
             g_daily_gain[id] = daily_gain;
+            g_daily_gain_cents[id] = daily_gain_cents;
             g_placement_target_sum[id] = placement_sum;
             g_placement_weight_sum[id] = placement_weight;
 
@@ -2011,7 +2643,10 @@ stock save_player(id, bool:force)
         return;
     }
 
-    add_authid_to_slots(g_authid[id]);
+    if (!testmode)
+    {
+        add_authid_to_slots(g_authid[id]);
+    }
 
     new name[NAME_LEN];
     get_clean_user_name(id, name, charsmax(name));
@@ -2025,7 +2660,7 @@ stock save_player(id, bool:force)
     new key[64], data[DATA_LEN];
     formatex(key, charsmax(key), "elo:%s", g_authid[id]);
     refresh_daily_window(id);
-    formatex(data, charsmax(data), "%d %d %d %d %d %d %d %d %.3f %.3f %s",
+    formatex(data, charsmax(data), "%d %d %d %d %d %d %d %d %.3f %.3f %d %d %s",
         g_elo[id],
         g_ranked_rounds[id],
         g_wins[id],
@@ -2036,6 +2671,8 @@ stock save_player(id, bool:force)
         g_daily_gain[id],
         g_placement_target_sum[id],
         g_placement_weight_sum[id],
+        g_elo_cents[id],
+        g_daily_gain_cents[id],
         g_saved_name[id]
     );
 
@@ -2053,7 +2690,7 @@ stock save_all_connected(bool:force)
     }
 }
 
-stock bool:load_elo_by_authid(const authid[], &elo, &rounds, &wins, &losses, &highest, name[], name_len, &last_seen, &daily_day, &daily_gain, &Float:placement_sum, &Float:placement_weight)
+stock bool:load_elo_by_authid(const authid[], &elo, &elo_cents, &rounds, &wins, &losses, &highest, name[], name_len, &last_seen, &daily_day, &daily_gain, &daily_gain_cents, &Float:placement_sum, &Float:placement_weight)
 {
     if (g_vault == INVALID_VAULT || authid[0] == 0)
     {
@@ -2070,6 +2707,7 @@ stock bool:load_elo_by_authid(const authid[], &elo, &rounds, &wins, &losses, &hi
 
     new elo_text[16], rounds_text[16], wins_text[16], losses_text[16], highest_text[16], seen_text[16];
     new daily_day_text[16], daily_gain_text[16], placement_sum_text[16], placement_weight_text[16];
+    new elo_cents_text[16], daily_gain_cents_text[16];
 
     parse(data,
         elo_text, charsmax(elo_text),
@@ -2082,6 +2720,8 @@ stock bool:load_elo_by_authid(const authid[], &elo, &rounds, &wins, &losses, &hi
         daily_gain_text, charsmax(daily_gain_text),
         placement_sum_text, charsmax(placement_sum_text),
         placement_weight_text, charsmax(placement_weight_text),
+        elo_cents_text, charsmax(elo_cents_text),
+        daily_gain_cents_text, charsmax(daily_gain_cents_text),
         name, name_len
     );
 
@@ -2095,6 +2735,26 @@ stock bool:load_elo_by_authid(const authid[], &elo, &rounds, &wins, &losses, &hi
     daily_gain = str_to_num(daily_gain_text);
     placement_sum = str_to_float(placement_sum_text);
     placement_weight = str_to_float(placement_weight_text);
+    elo_cents = elo_to_cents(elo);
+    daily_gain_cents = elo_to_cents(daily_gain);
+
+    if (elo_cents_text[0] != 0 && is_numeric_text(elo_cents_text))
+    {
+        elo_cents = str_to_num(elo_cents_text);
+    }
+
+    if (daily_gain_cents_text[0] != 0 && is_numeric_text(daily_gain_cents_text))
+    {
+        daily_gain_cents = str_to_num(daily_gain_cents_text);
+    }
+    else if (daily_gain_cents_text[0] != 0 && !is_numeric_text(daily_gain_cents_text) && name[0] == 0)
+    {
+        copy(name, name_len, daily_gain_cents_text);
+    }
+    else if (elo_cents_text[0] != 0 && !is_numeric_text(elo_cents_text) && name[0] == 0)
+    {
+        copy(name, name_len, elo_cents_text);
+    }
 
     if (name[0] == 0 && placement_weight_text[0] != 0 && !is_float_text(placement_weight_text))
     {
@@ -2122,6 +2782,14 @@ stock bool:load_elo_by_authid(const authid[], &elo, &rounds, &wins, &losses, &hi
         placement_sum = 0.0;
         placement_weight = 0.0;
     }
+
+    if (elo_cents < 0)
+    {
+        elo_cents = 0;
+    }
+
+    elo = cents_to_elo_floor(elo_cents);
+    daily_gain = cents_to_elo_floor(daily_gain_cents);
 
     if (placement_weight <= 0.0 && placement_sum > 0.0 && rounds > 0 && is_placement_round_count(rounds))
     {
@@ -2211,11 +2879,13 @@ stock find_authid_slot(const authid[])
 
 stock print_elo_to_player(receiver, target)
 {
-    new title[48];
+    new title[48], elo_text[16], daily_gain_text[16];
     get_rank_title(g_elo[target], g_ranked_rounds[target], title, charsmax(title));
+    format_elo_cents(g_elo_cents[target], elo_text, charsmax(elo_text));
+    format_elo_cents(g_daily_gain_cents[target], daily_gain_text, charsmax(daily_gain_text));
 
-    client_print(receiver, print_chat, "[SAVEKAI ELO] Tavo ELO: %d | Rank: %s | Roundai: %d",
-        g_elo[target],
+    client_print(receiver, print_chat, "[SAVEKAI ELO] Tavo ELO: %s | Rank: %s | Roundai: %d",
+        elo_text,
         title,
         g_ranked_rounds[target]
     );
@@ -2227,16 +2897,18 @@ stock print_elo_to_player(receiver, target)
 
     if (is_placement_round_count(g_ranked_rounds[target]))
     {
-        client_print(receiver, print_chat, "[SAVEKAI ELO] Placement estimate: %d/%d roundu. Min: %d.",
+        client_print(receiver, print_chat, "[SAVEKAI ELO] Placement: %d/%d roundu | Estimate: %s | Min: %d.",
             g_ranked_rounds[target],
             get_placement_rounds(),
+            elo_text,
             get_placement_min_rounds()
         );
     }
 
     refresh_daily_window(target);
-    client_print(receiver, print_chat, "[SAVEKAI ELO] Daily gain: +%d | Leaderboard nuo %d roundu.",
-        get_effective_daily_gain(target),
+    format_elo_cents(g_daily_gain_cents[target], daily_gain_text, charsmax(daily_gain_text));
+    client_print(receiver, print_chat, "[SAVEKAI ELO] Daily gain: +%s | Leaderboard nuo %d roundu.",
+        daily_gain_text,
         get_pcvar_num(g_cvar_min_leaderboard_rounds)
     );
 
@@ -2255,13 +2927,14 @@ stock print_elo_to_player(receiver, target)
 
 stock print_elo_to_console(admin, target)
 {
-    new name[NAME_LEN], title[48];
+    new name[NAME_LEN], title[48], elo_text[16];
     get_user_name(target, name, charsmax(name));
     get_rank_title(g_elo[target], g_ranked_rounds[target], title, charsmax(title));
+    format_elo_cents(g_elo_cents[target], elo_text, charsmax(elo_text));
 
-    console_print(admin, "[SAVEKAI ELO] %s | ELO %d | Rank %s | Rounds %d | W/L %d/%d | Highest %d",
+    console_print(admin, "[SAVEKAI ELO] %s | ELO %s | Rank %s | Rounds %d | W/L %d/%d | Highest %d",
         name,
-        g_elo[target],
+        elo_text,
         title,
         g_ranked_rounds[target],
         g_wins[target],
@@ -2275,8 +2948,7 @@ stock show_topelo_motd(id)
     new motd[MOTD_LEN];
     new len = 0;
     new min_rounds = get_pcvar_num(g_cvar_min_leaderboard_rounds);
-    new bool:testmode = get_pcvar_num(g_cvar_testmode) != 0;
-    new top_elo[TOP_SIZE];
+    new top_elo_cents[TOP_SIZE];
     new top_rounds[TOP_SIZE];
     new top_name[TOP_SIZE][NAME_LEN];
 
@@ -2294,10 +2966,10 @@ stock show_topelo_motd(id)
             continue;
         }
 
-        new name[NAME_LEN], elo, rounds, wins, losses, highest, last_seen, daily_day, daily_gain;
+        new name[NAME_LEN], elo, elo_cents, rounds, wins, losses, highest, last_seen, daily_day, daily_gain, daily_gain_cents;
         new Float:placement_sum, Float:placement_weight;
 
-        if (!load_elo_by_authid(authid, elo, rounds, wins, losses, highest, name, charsmax(name), last_seen, daily_day, daily_gain, placement_sum, placement_weight))
+        if (!load_elo_by_authid(authid, elo, elo_cents, rounds, wins, losses, highest, name, charsmax(name), last_seen, daily_day, daily_gain, daily_gain_cents, placement_sum, placement_weight))
         {
             continue;
         }
@@ -2307,27 +2979,28 @@ stock show_topelo_motd(id)
             continue;
         }
 
-        insert_topelo_candidate(name, elo, rounds, top_elo, top_rounds, top_name);
+        insert_topelo_candidate(name, elo_cents, rounds, top_elo_cents, top_rounds, top_name);
     }
 
     new shown = 0;
 
     for (new i = 0; i < TOP_SIZE; i++)
     {
-        if (top_elo[i] <= 0)
+        if (top_elo_cents[i] <= 0)
         {
             continue;
         }
 
-        new safe_name[NAME_LEN * 2], title[48];
+        new safe_name[NAME_LEN * 2], title[48], elo_text[16];
         html_escape(top_name[i], safe_name, charsmax(safe_name));
-        get_rank_title_by_elo(top_elo[i], title, charsmax(title));
+        get_rank_title_by_elo(cents_to_elo_floor(top_elo_cents[i]), title, charsmax(title));
+        format_elo_cents(top_elo_cents[i], elo_text, charsmax(elo_text));
 
         len += formatex(motd[len], charsmax(motd) - len,
-            "<tr><td>%d</td><td>%s</td><td>%d</td><td>%d</td><td>%s</td></tr>",
+            "<tr><td>%d</td><td>%s</td><td>%s</td><td>%d</td><td>%s</td></tr>",
             i + 1,
             safe_name,
-            top_elo[i],
+            elo_text,
             top_rounds[i],
             title
         );
@@ -2336,56 +3009,36 @@ stock show_topelo_motd(id)
 
     if (!shown)
     {
-        if (testmode)
-        {
-            len += formatex(motd[len], charsmax(motd) - len,
-                "<tr><td colspan=5>Testmode is ON, so official leaderboard data is not saved yet.</td></tr>"
-            );
-        }
-        else
-        {
-            len += formatex(motd[len], charsmax(motd) - len,
-                "<tr><td colspan=5>No players with %d+ ranked rounds yet.</td></tr>",
-                min_rounds
-            );
-        }
+        len += formatex(motd[len], charsmax(motd) - len,
+            "<tr><td colspan=5>No Season 0 leaderboard players yet. Players need %d+ saved ranked rounds.</td></tr>",
+            min_rounds
+        );
     }
 
-    new testmode_text[4];
-
-    if (testmode)
-    {
-        copy(testmode_text, charsmax(testmode_text), "ON");
-    }
-    else
-    {
-        copy(testmode_text, charsmax(testmode_text), "OFF");
-    }
-
-    formatex(motd[len], charsmax(motd) - len, "</table><p>Testmode: %s</p></body></html>",
-        testmode_text
+    formatex(motd[len], charsmax(motd) - len,
+        "</table><p>Season 0 Beta leaderboard. /rank stays normal CS stats; use /elo for SAVEKAI ELO.</p></body></html>"
     );
 
     show_motd(id, motd, "SAVEKAI Top ELO");
 }
 
-stock insert_topelo_candidate(const name[], elo, rounds, top_elo[], top_rounds[], top_name[][NAME_LEN])
+stock insert_topelo_candidate(const name[], elo_cents, rounds, top_elo_cents[], top_rounds[], top_name[][NAME_LEN])
 {
     for (new pos = 0; pos < TOP_SIZE; pos++)
     {
-        if (elo <= top_elo[pos])
+        if (elo_cents <= top_elo_cents[pos])
         {
             continue;
         }
 
         for (new move = TOP_SIZE - 1; move > pos; move--)
         {
-            top_elo[move] = top_elo[move - 1];
+            top_elo_cents[move] = top_elo_cents[move - 1];
             top_rounds[move] = top_rounds[move - 1];
             copy(top_name[move], NAME_LEN - 1, top_name[move - 1]);
         }
 
-        top_elo[pos] = elo;
+        top_elo_cents[pos] = elo_cents;
         top_rounds[pos] = rounds;
         copy(top_name[pos], NAME_LEN - 1, name);
         break;
@@ -2406,7 +3059,7 @@ stock set_player_elo_admin(admin, target, new_elo, const action[])
     }
 
     new old_elo = g_elo[target];
-    g_elo[target] = new_elo;
+    set_elo_cents(target, elo_to_cents(new_elo));
 
     if (g_elo[target] > g_highest_elo[target])
     {
@@ -2650,6 +3303,7 @@ stock reset_round_player(id)
     g_round_eligible[id] = false;
     g_round_team[id] = TEAM_NONE;
     g_round_elo[id] = 0;
+    g_round_elo_cents[id] = 0;
     g_round_kills[id] = 0;
     g_round_deaths[id] = 0;
     g_round_damage[id] = 0;
@@ -2674,6 +3328,7 @@ stock reset_player_memory(id)
     g_clean_name[id][0] = 0;
     g_tag_lock[id] = false;
     g_elo[id] = 0;
+    g_elo_cents[id] = 0;
     g_ranked_rounds[id] = 0;
     g_wins[id] = 0;
     g_losses[id] = 0;
@@ -2681,10 +3336,13 @@ stock reset_player_memory(id)
     g_last_seen[id] = 0;
     g_daily_day[id] = 0;
     g_daily_gain[id] = 0;
+    g_daily_gain_cents[id] = 0;
     g_placement_target_sum[id] = 0.0;
     g_placement_weight_sum[id] = 0.0;
     g_session_delta[id] = 0;
     g_session_gain[id] = 0;
+    g_session_delta_cents[id] = 0;
+    g_session_gain_cents[id] = 0;
     g_session_placement_target_sum[id] = 0.0;
     g_session_placement_weight_sum[id] = 0.0;
     g_session_rounds[id] = 0;
@@ -2763,6 +3421,119 @@ stock format_delta(delta, output[], output_len)
     formatex(output, output_len, "%d", delta);
 }
 
+stock set_elo_cents(id, elo_cents)
+{
+    if (elo_cents < 0)
+    {
+        elo_cents = 0;
+    }
+
+    g_elo_cents[id] = elo_cents;
+    g_elo[id] = cents_to_elo_floor(elo_cents);
+}
+
+stock elo_to_cents(elo)
+{
+    return elo * ELO_SCALE;
+}
+
+stock cents_to_elo_floor(elo_cents)
+{
+    if (elo_cents <= 0)
+    {
+        return 0;
+    }
+
+    return elo_cents / ELO_SCALE;
+}
+
+stock cents_to_elo_trunc(elo_cents)
+{
+    return elo_cents / ELO_SCALE;
+}
+
+stock clamp_elo_cents_to_placement(elo_cents)
+{
+    new min_cents = elo_to_cents(get_pcvar_num(g_cvar_placement_min_elo));
+    new max_cents = elo_to_cents(get_pcvar_num(g_cvar_placement_max_elo));
+    new hard_max_cents = elo_to_cents(2000);
+
+    if (min_cents < 0)
+    {
+        min_cents = elo_to_cents(800);
+    }
+
+    if (max_cents < min_cents)
+    {
+        max_cents = hard_max_cents;
+    }
+
+    if (max_cents > hard_max_cents)
+    {
+        max_cents = hard_max_cents;
+    }
+
+    if (elo_cents < min_cents)
+    {
+        return min_cents;
+    }
+
+    if (elo_cents > max_cents)
+    {
+        return max_cents;
+    }
+
+    return elo_cents;
+}
+
+stock format_elo_cents(elo_cents, output[], output_len)
+{
+    if (!get_pcvar_num(g_cvar_decimal_display))
+    {
+        formatex(output, output_len, "%d", cents_to_elo_floor(elo_cents));
+        return;
+    }
+
+    new abs_cents = elo_cents;
+    new sign[2];
+
+    if (abs_cents < 0)
+    {
+        abs_cents = -abs_cents;
+        copy(sign, charsmax(sign), "-");
+    }
+    else
+    {
+        sign[0] = 0;
+    }
+
+    formatex(output, output_len, "%s%d.%02d", sign, abs_cents / ELO_SCALE, abs_cents % ELO_SCALE);
+}
+
+stock format_delta_cents(delta_cents, output[], output_len)
+{
+    if (!get_pcvar_num(g_cvar_decimal_display))
+    {
+        format_delta(cents_to_elo_trunc(delta_cents), output, output_len);
+        return;
+    }
+
+    new abs_cents = delta_cents;
+    new sign[2];
+
+    if (abs_cents < 0)
+    {
+        abs_cents = -abs_cents;
+        copy(sign, charsmax(sign), "-");
+    }
+    else
+    {
+        copy(sign, charsmax(sign), "+");
+    }
+
+    formatex(output, output_len, "%s%d.%02d", sign, abs_cents / ELO_SCALE, abs_cents % ELO_SCALE);
+}
+
 stock log_elo_round_skip(const reason[])
 {
     if (!get_pcvar_num(g_cvar_log_enabled))
@@ -2805,23 +3576,77 @@ stock bool:is_chat_command(const args[], const command[])
 
 stock strip_elo_tags(name[], len)
 {
-    replace_all(name, len, " [SGM]", "");
-    replace_all(name, len, " [SIM]", "");
-    replace_all(name, len, " [SM]", "");
-    replace_all(name, len, " [G]", "");
-    replace_all(name, len, " [V]", "");
-    replace_all(name, len, " [P]", "");
-    replace_all(name, len, " [N]", "");
-    replace_all(name, len, " [U]", "");
-    replace_all(name, len, "[SGM]", "");
-    replace_all(name, len, "[SIM]", "");
-    replace_all(name, len, "[SM]", "");
-    replace_all(name, len, "[G]", "");
-    replace_all(name, len, "[V]", "");
-    replace_all(name, len, "[P]", "");
-    replace_all(name, len, "[N]", "");
-    replace_all(name, len, "[U]", "");
+    new output[NAME_LEN];
+    new write_pos = 0;
+
+    for (new read_pos = 0; name[read_pos] != 0 && write_pos < charsmax(output);)
+    {
+        if (is_elo_tag_at(name, read_pos))
+        {
+            while (name[read_pos] != 0 && name[read_pos] != ']')
+            {
+                read_pos++;
+            }
+
+            if (name[read_pos] == ']')
+            {
+                read_pos++;
+            }
+
+            if (name[read_pos] == ' ')
+            {
+                read_pos++;
+            }
+
+            continue;
+        }
+
+        output[write_pos++] = name[read_pos++];
+    }
+
+    output[write_pos] = 0;
+    copy(name, len, output);
+
+    replace_all(name, len, "  ", " ");
     trim(name);
+}
+
+stock bool:is_elo_tag_at(const name[], pos)
+{
+    if (name[pos] != '[')
+    {
+        return false;
+    }
+
+    if (is_specific_elo_tag_at(name, pos, "SGM") ||
+        is_specific_elo_tag_at(name, pos, "SIM") ||
+        is_specific_elo_tag_at(name, pos, "SM") ||
+        is_specific_elo_tag_at(name, pos, "G") ||
+        is_specific_elo_tag_at(name, pos, "V") ||
+        is_specific_elo_tag_at(name, pos, "P") ||
+        is_specific_elo_tag_at(name, pos, "N") ||
+        is_specific_elo_tag_at(name, pos, "U"))
+    {
+        return true;
+    }
+
+    return false;
+}
+
+stock bool:is_specific_elo_tag_at(const name[], pos, const tag[])
+{
+    new tag_len = strlen(tag);
+
+    for (new i = 0; i < tag_len; i++)
+    {
+        if (name[pos + 1 + i] != tag[i])
+        {
+            return false;
+        }
+    }
+
+    new next = name[pos + 1 + tag_len];
+    return next == ']' || next == ' ';
 }
 
 stock get_clean_user_name(id, output[], output_len)
