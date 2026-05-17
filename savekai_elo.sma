@@ -101,6 +101,15 @@ new g_round_teamkills[MAX_CLIENTS + 1];
 new g_round_suicides[MAX_CLIENTS + 1];
 new g_round_clutch[MAX_CLIENTS + 1];
 new bool:g_round_mvp[MAX_CLIENTS + 1];
+new g_round_headshots[MAX_CLIENTS + 1];
+new g_round_knife_kills[MAX_CLIENTS + 1];
+new g_round_he_kills[MAX_CLIENTS + 1];
+new g_round_hostage[MAX_CLIENTS + 1];
+new bool:g_round_entry_kill[MAX_CLIENTS + 1];
+new bool:g_round_entry_death[MAX_CLIENTS + 1];
+new bool:g_round_first_blood_done;
+new g_streak_wins[MAX_CLIENTS + 1];
+new g_streak_losses[MAX_CLIENTS + 1];
 new bool:g_round_snapshot_valid;
 new g_round_winner;
 new bool:g_warned_missing_mode_cvar;
@@ -154,6 +163,23 @@ new g_cvar_perf_carry_loss_cap;
 new g_cvar_perf_hardcarry_loss_cap;
 new g_cvar_perf_hardcarry_kills;
 new g_cvar_perf_hardcarry_damage;
+new g_cvar_perf_headshot;
+new g_cvar_perf_multi_3k;
+new g_cvar_perf_multi_4k;
+new g_cvar_perf_multi_5k;
+new g_cvar_perf_entry_kill;
+new g_cvar_perf_entry_death;
+new g_cvar_perf_knife_kill;
+new g_cvar_perf_he_kill;
+new g_cvar_perf_survive;
+new g_cvar_perf_plant_win;
+new g_cvar_perf_defuse_win;
+new g_cvar_perf_hostage_rescue;
+new g_cvar_perf_streak_win;
+new g_cvar_perf_streak_loss;
+new g_cvar_perf_streak_max;
+new g_cvar_result_weight;
+new g_cvar_perf_weight;
 new g_cvar_lost_round_max_delta;
 new g_cvar_won_round_min_delta;
 new g_cvar_min_players;
@@ -242,6 +268,23 @@ public plugin_init()
     g_cvar_perf_suicide = register_cvar("savekai_elo_perf_suicide", "-1.00");
     g_cvar_perf_max_bonus = register_cvar("savekai_elo_perf_max_bonus", "2.0");
     g_cvar_perf_max_penalty = register_cvar("savekai_elo_perf_max_penalty", "-2.0");
+    g_cvar_perf_headshot = register_cvar("savekai_elo_perf_headshot", "0.15");
+    g_cvar_perf_multi_3k = register_cvar("savekai_elo_perf_multi_3k", "0.40");
+    g_cvar_perf_multi_4k = register_cvar("savekai_elo_perf_multi_4k", "0.75");
+    g_cvar_perf_multi_5k = register_cvar("savekai_elo_perf_multi_5k", "1.25");
+    g_cvar_perf_entry_kill = register_cvar("savekai_elo_perf_entry_kill", "0.25");
+    g_cvar_perf_entry_death = register_cvar("savekai_elo_perf_entry_death", "0.10");
+    g_cvar_perf_knife_kill = register_cvar("savekai_elo_perf_knife_kill", "0.50");
+    g_cvar_perf_he_kill = register_cvar("savekai_elo_perf_he_kill", "0.30");
+    g_cvar_perf_survive = register_cvar("savekai_elo_perf_survive", "0.10");
+    g_cvar_perf_plant_win = register_cvar("savekai_elo_perf_plant_win", "0.30");
+    g_cvar_perf_defuse_win = register_cvar("savekai_elo_perf_defuse_win", "0.30");
+    g_cvar_perf_hostage_rescue = register_cvar("savekai_elo_perf_hostage_rescue", "0.50");
+    g_cvar_perf_streak_win = register_cvar("savekai_elo_perf_streak_win", "0.10");
+    g_cvar_perf_streak_loss = register_cvar("savekai_elo_perf_streak_loss", "-0.07");
+    g_cvar_perf_streak_max = register_cvar("savekai_elo_perf_streak_max", "1.00");
+    g_cvar_result_weight = register_cvar("savekai_elo_result_weight", "0.65");
+    g_cvar_perf_weight = register_cvar("savekai_elo_perf_weight", "0.35");
     g_cvar_perf_carry_protection = register_cvar("savekai_elo_perf_carry_protection", "1");
     g_cvar_perf_carry_kills = register_cvar("savekai_elo_perf_carry_kills", "2");
     g_cvar_perf_carry_damage = register_cvar("savekai_elo_perf_carry_damage", "150");
@@ -310,6 +353,7 @@ public plugin_init()
     register_logevent("logevent_round_end", 2, "1=Round_End");
     register_logevent("logevent_bomb_planted", 3, "2=Planted_The_Bomb");
     register_logevent("logevent_bomb_defused", 3, "2=Defused_The_Bomb");
+    register_logevent("logevent_hostage_rescued", 3, "2=Rescued_A_Hostage");
     register_event("SendAudio", "event_t_win", "a", "2=%!MRAD_terwin");
     register_event("SendAudio", "event_ct_win", "a", "2=%!MRAD_ctwin");
     register_event("SendAudio", "event_round_draw", "a", "2=%!MRAD_rounddraw");
@@ -628,6 +672,8 @@ public concmd_resetelo(id, level, cid)
     g_session_rounds[target] = 0;
     g_session_wins[target] = 0;
     g_session_losses[target] = 0;
+    g_streak_wins[target] = 0;
+    g_streak_losses[target] = 0;
 
     save_player(target, true);
     update_scoreboard_tag(target);
@@ -774,6 +820,34 @@ public event_deathmsg()
 
     update_clutch_state(attacker, attacker_team, victim_team);
     g_round_kills[attacker]++;
+
+    if (read_data(3) != 0)
+    {
+        g_round_headshots[attacker]++;
+    }
+
+    new weapon[24];
+    read_data(4, weapon, charsmax(weapon));
+
+    if (equal(weapon, "knife"))
+    {
+        g_round_knife_kills[attacker]++;
+    }
+    else if (equal(weapon, "grenade") || equal(weapon, "hegrenade"))
+    {
+        g_round_he_kills[attacker]++;
+    }
+
+    if (!g_round_first_blood_done)
+    {
+        g_round_first_blood_done = true;
+        g_round_entry_kill[attacker] = true;
+
+        if (g_round_eligible[victim])
+        {
+            g_round_entry_death[victim] = true;
+        }
+    }
 }
 
 public event_damage(victim)
@@ -825,6 +899,16 @@ public logevent_bomb_defused()
     if (id >= 1 && id <= MAX_CLIENTS && g_round_eligible[id])
     {
         g_round_defuses[id]++;
+    }
+}
+
+public logevent_hostage_rescued()
+{
+    new id = get_logevent_player();
+
+    if (id >= 1 && id <= MAX_CLIENTS && g_round_eligible[id])
+    {
+        g_round_hostage[id]++;
     }
 }
 
@@ -884,6 +968,7 @@ stock snapshot_round_players()
         g_round_elo_cents[id] = g_elo_cents[id];
     }
 
+    g_round_first_blood_done = false;
     g_round_snapshot_valid = true;
     log_round_snapshot();
 }
@@ -1094,8 +1179,40 @@ stock apply_round_delta(id, Float:t_avg, Float:ct_avg, Float:map_multiplier, Flo
     new Float:result = won ? 1.0 : 0.0;
     new Float:k = get_k_coefficient(old_elo, g_ranked_rounds[id]);
     new Float:base_delta = k * (result - expected);
-    new Float:perf_delta = get_performance_modifier(id, placement);
+    new Float:perf_delta = get_performance_modifier(id, placement, won);
     new Float:placement_weight = 1.0;
+
+    /*
+     * Controlled result/performance split. The round result (base_delta)
+     * is the dominant term. Performance is bounded to a fraction of
+     * |base_delta| set by perf_weight / result_weight, so a won round
+     * (base_delta > 0) can never become a net ELO loss: worst case it is
+     * (1 - perf_share) * base_delta, still positive.
+     */
+    new Float:result_weight = get_pcvar_float(g_cvar_result_weight);
+    new Float:perf_weight = get_pcvar_float(g_cvar_perf_weight);
+
+    if (result_weight <= 0.0)
+    {
+        result_weight = 1.0;
+    }
+
+    if (perf_weight < 0.0)
+    {
+        perf_weight = 0.0;
+    }
+
+    new Float:perf_bound = floatabs(base_delta) * (perf_weight / result_weight);
+
+    if (perf_delta > perf_bound)
+    {
+        perf_delta = perf_bound;
+    }
+    else if (perf_delta < -perf_bound)
+    {
+        perf_delta = -perf_bound;
+    }
+
     new Float:raw_delta = (base_delta + perf_delta) * map_multiplier * player_multiplier * uneven_multiplier * rated_vs_placement_multiplier;
     new delta_cents = floatround(raw_delta * float(ELO_SCALE));
     new before_softcap_cents = delta_cents;
@@ -1179,10 +1296,14 @@ stock apply_round_delta(id, Float:t_avg, Float:ct_avg, Float:map_multiplier, Flo
     if (won)
     {
         g_session_wins[id]++;
+        g_streak_wins[id]++;
+        g_streak_losses[id] = 0;
     }
     else
     {
         g_session_losses[id]++;
+        g_streak_losses[id]++;
+        g_streak_wins[id] = 0;
     }
 
     if (placement && !save_test_placement)
@@ -1389,6 +1510,22 @@ stock log_round_delta(id, old_elo_cents, new_elo_cents, delta_cents, before_soft
         rated_avg_used,
         placement_avg_used
     );
+
+    log_to_file("savekai_elo.log",
+        "PERF auth=%s hs=%d knife=%d he=%d hostage=%d entry_kill=%d entry_death=%d survived=%d streak_w=%d streak_l=%d base=%.2f perf=%.2f",
+        g_authid[id],
+        g_round_headshots[id],
+        g_round_knife_kills[id],
+        g_round_he_kills[id],
+        g_round_hostage[id],
+        g_round_entry_kill[id] ? 1 : 0,
+        g_round_entry_death[id] ? 1 : 0,
+        g_round_deaths[id] == 0 ? 1 : 0,
+        g_streak_wins[id],
+        g_streak_losses[id],
+        base_delta,
+        perf_delta
+    );
 }
 
 stock bool:is_round_player_valid(id)
@@ -1586,7 +1723,7 @@ stock Float:get_k_coefficient(elo, ranked_rounds)
     return get_pcvar_float(g_cvar_k_normal);
 }
 
-stock Float:get_performance_modifier(id, bool:placement)
+stock Float:get_performance_modifier(id, bool:placement, bool:won)
 {
     if (!get_pcvar_num(g_cvar_perf_enabled))
     {
@@ -1636,6 +1773,81 @@ stock Float:get_performance_modifier(id, bool:placement)
             modifier += get_pcvar_float(g_cvar_perf_clutch_1v4);
         }
     }
+
+    modifier += float(g_round_headshots[id]) * get_pcvar_float(g_cvar_perf_headshot);
+    modifier += float(g_round_knife_kills[id]) * get_pcvar_float(g_cvar_perf_knife_kill);
+    modifier += float(g_round_he_kills[id]) * get_pcvar_float(g_cvar_perf_he_kill);
+    modifier += float(g_round_hostage[id]) * get_pcvar_float(g_cvar_perf_hostage_rescue);
+
+    new round_kills = g_round_kills[id];
+
+    if (round_kills >= 5)
+    {
+        modifier += get_pcvar_float(g_cvar_perf_multi_5k);
+    }
+    else if (round_kills == 4)
+    {
+        modifier += get_pcvar_float(g_cvar_perf_multi_4k);
+    }
+    else if (round_kills == 3)
+    {
+        modifier += get_pcvar_float(g_cvar_perf_multi_3k);
+    }
+
+    if (g_round_entry_kill[id])
+    {
+        modifier += get_pcvar_float(g_cvar_perf_entry_kill);
+    }
+
+    if (g_round_entry_death[id])
+    {
+        modifier += get_pcvar_float(g_cvar_perf_entry_death);
+    }
+
+    if (g_round_deaths[id] == 0)
+    {
+        modifier += get_pcvar_float(g_cvar_perf_survive);
+    }
+
+    new perf_team = g_round_team[id];
+
+    if (won && perf_team == TEAM_T && g_round_plants[id] > 0)
+    {
+        modifier += get_pcvar_float(g_cvar_perf_plant_win);
+    }
+
+    if (won && perf_team == TEAM_CT && g_round_defuses[id] > 0)
+    {
+        modifier += get_pcvar_float(g_cvar_perf_defuse_win);
+    }
+
+    new Float:streak_mod = 0.0;
+
+    if (g_streak_wins[id] > 0)
+    {
+        streak_mod = float(g_streak_wins[id]) * get_pcvar_float(g_cvar_perf_streak_win);
+    }
+    else if (g_streak_losses[id] > 0)
+    {
+        streak_mod = float(g_streak_losses[id]) * get_pcvar_float(g_cvar_perf_streak_loss);
+    }
+
+    new Float:streak_cap = get_pcvar_float(g_cvar_perf_streak_max);
+
+    if (streak_cap > 0.0)
+    {
+        if (streak_mod > streak_cap)
+        {
+            streak_mod = streak_cap;
+        }
+
+        if (streak_mod < -streak_cap)
+        {
+            streak_mod = -streak_cap;
+        }
+    }
+
+    modifier += streak_mod;
 
     new Float:max_bonus = get_pcvar_float(g_cvar_perf_max_bonus);
     new Float:max_penalty = get_pcvar_float(g_cvar_perf_max_penalty);
@@ -3284,6 +3496,7 @@ stock reset_round_snapshot()
 {
     g_round_snapshot_valid = false;
     g_round_winner = TEAM_NONE;
+    g_round_first_blood_done = false;
 
     for (new id = 1; id <= MAX_CLIENTS; id++)
     {
@@ -3311,6 +3524,12 @@ stock reset_round_player(id)
     g_round_suicides[id] = 0;
     g_round_clutch[id] = 0;
     g_round_mvp[id] = false;
+    g_round_headshots[id] = 0;
+    g_round_knife_kills[id] = 0;
+    g_round_he_kills[id] = 0;
+    g_round_hostage[id] = 0;
+    g_round_entry_kill[id] = false;
+    g_round_entry_death[id] = false;
 }
 
 stock reset_player_memory(id)
@@ -3346,6 +3565,8 @@ stock reset_player_memory(id)
     g_session_rounds[id] = 0;
     g_session_wins[id] = 0;
     g_session_losses[id] = 0;
+    g_streak_wins[id] = 0;
+    g_streak_losses[id] = 0;
 }
 
 stock sanitize_name(name[], len)
