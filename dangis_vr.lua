@@ -794,10 +794,12 @@ local function writeSharedState(state)
 end
 
 -- test_freeze.lua signals through dangis_vr_freeze.flag (checked at most every 50 ms).
+-- forceRead: skip the cache. The control thread does this once per frame, so a
+-- new flag is seen in the first frame it exists and outranks bump recovery.
 local freezeFlagCached, freezeFlagCheckedAt = false, -1.0
-local function sharedFreezeActive()
+local function sharedFreezeActive(forceRead)
     local now = os.clock()
-    if now - freezeFlagCheckedAt >= 0.05 then
+    if forceRead or now - freezeFlagCheckedAt >= 0.05 then
         freezeFlagCached = fileExists(freeze_flag_file)
         freezeFlagCheckedAt = now
     end
@@ -868,6 +870,10 @@ local function releaseControls(reason)
     if playing then
         setGameKeyState(0, 0)
         writeDriveControls(0, 0)
+        if freezeRecoveryOwnsControls() then
+            -- foot-brake mode never writes the handbrake; a freeze neutralises it too
+            writeMemory(CONFIG.controls.handbrakeAddress, 2, 0, false)
+        end
     end
     reverseActive = false
     writeSharedState(pauseReleaseReason)
@@ -3192,7 +3198,8 @@ end
 function RecoverySystem.updateControlThread()
     local now = os.clock()
     syncPausedState(now)
-    local freezeActive = sharedFreezeActive()
+    -- Runs before the playback thread each frame: read the flag fresh here.
+    local freezeActive = sharedFreezeActive(true)
     if not freezeActive then
         S.externalFreezeAck = false
     end
