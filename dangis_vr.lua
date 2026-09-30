@@ -1,6 +1,8 @@
 script_name('dangis_vr')
-script_version('5.48')
+script_version('5.49')
 require 'lib.moonloader'
+
+local VR_VERSION = "5.49"
 
 local recording = false
 local playing = false
@@ -8,21 +10,22 @@ local repeating = false
 local paused = false
 local current_route = {}
 local play_index = 1
-local current_name = "route1"
+local current_name -- from CONFIG.route.defaultName
 local paths_dir = getWorkingDirectory() .. "/dangis_paths/"
 local shared_state_file = getWorkingDirectory() .. "/dangis_vr_state.txt"
 local freeze_flag_file = getWorkingDirectory() .. "/dangis_vr_freeze.flag"
 local rotate_flag_file = getWorkingDirectory() .. "/dangis_vr_rotate.flag"
 local dialog_flag_file = getWorkingDirectory() .. "/dangis_vr_dialog.flag"
 local debug_log_file = getWorkingDirectory() .. "/dangis_vr_debug.log"
-local start_x, start_y, start_z = 0, 0, 0
-local routeRadius = 8.0
+local start_x, start_y = 0, 0
+local recordLeftStart = false
+-- routeRadius, recordingDelay, LOOKAHEAD and current_name are loaded from CONFIG.route.
+local routeRadius
 local tick = 0
-local recordingDelay = 80
+local recordingDelay
 local lastRecordHeading = 0
 
 local lastSteerValue = 0
-local steerNoiseValue = 0
 local steerNoiseDuration = 0
 local steerNoiseCooldown = 0
 local collisionCooldown = 0
@@ -48,9 +51,12 @@ local COLOR_ROUTE_BACK = 0xFF000000
 local COLOR_ROUTE_BACK_OUTLINE = 0xFFFFFFFF
 local recordDriveMode = DRIVE_FORWARD
 local playbackDriveMode = DRIVE_FORWARD
-local syntheticReverseKeyDown = false
-local reverseKeyFfi, reverseKeyUser32 = nil, nil
-local commandInputFfiReady = false
+local reverseActive = false
+-- Playback thresholds were tuned in frames; frameScale converts the real frame
+-- time into those reference frames so behaviour does not change with FPS.
+local frameScale = 1.0
+local lastPlaybackTickAt = nil
+local commandJob = nil
 
 
 
@@ -63,7 +69,7 @@ local samp = 0
 
 local S = {
     gasLiftFrames = 0, nextGasLift = 0,
-    lapWander = 0.0, lapCount = 0,
+    lapWander = 0.0,
     routeObstacleDist = math.huge, routeAvoidDir = 0, routeObstacleTimer = 0,
     routeObstacleUrgency = 0.0,
     avoidRouteDir = 0, avoidSideHit = false,
@@ -76,7 +82,9 @@ local S = {
     currentLateral = 0.0, nudgeOffset = 0.0, nudgeFrames = 0, nextNudge = 0,
     manualPaused = false,
     -- Legacy name: this means freeze/recovery owns controls, not only admin state.
-    frozenByAdmin = false, refreshSent = false, refreshTarget = 300,
+    frozenByAdmin = false, refreshSent = false,
+    -- A test_freeze flag that recovery already handled; cleared when the flag goes away.
+    externalFreezeAck = false,
     recentDriveSpeed = 0.0, recentDriveUntil = 0.0,
     testArbotasPaused = false,
     dialogPaused = false,
@@ -84,7 +92,6 @@ local S = {
     freezeTestLatched = false,
     freezeRecoveryMode = "",
     freezeRefreshSentAt = 0.0,
-    freezeFightUntil = 0.0,
     freezeReleaseUntil = 0.0,
     freezeRefreshAt = 0.0,
     freezeResumeDelay = 0.0,
@@ -109,8 +116,6 @@ local S = {
     forwardNoProgressFrames = 0,
     forwardNoProgressDist = 0.0,
     forwardNoProgressIndex = 0,
-    rejoinFrames = 0,
-    rejoinSteer = 0,
     rejoinCooldownUntil = 0.0,
     rejoinDisableUntil = 0.0,
 }
@@ -135,20 +140,39 @@ local AVOID_OBJECT_MODELS = {
 -- InputHandler/MainLoop: hotkeys, threads, and frame order.
 local CONFIG = {
     route = {
-        radius = routeRadius,
-        recordingDelay = recordingDelay,
-        lookahead = LOOKAHEAD,
+        radius = 8.0,           -- distance that counts as reaching a waypoint
+        recordingDelay = 80,    -- ms between recorded points
+        lookahead = LOOKAHEAD,  -- points ahead used for the steering target
         pathsDir = paths_dir,
-        defaultName = current_name,
+        defaultName = "route1", -- saved as <name>.txt; the previous copy is kept as .txt.bak
     },
     controls = {
         steerKey = 0,
+        -- CPad NewState buttons (GTA SA 1.0 US). In a car: Cross = accelerate,
+        -- Square = brake (reverses once the car has stopped), RightShoulder1 = handbrake.
         gasAddress = 0xB73458 + 0x20,
-        brakeAddress = 0xB73458 + 0xC,
+        footBrakeAddress = 0xB73458 + 0x1C,
+        handbrakeAddress = 0xB73458 + 0x0C,
+        -- "foot": slow down with the real brake. "hand": pre-5.49 behaviour,
+        -- which (unintentionally) braked with the handbrake.
+        brakeMode = "foot",
+        footBrakeMinSpeed = 1.0, -- never hold the brake below this forward speed (it would reverse)
+        -- "bangbang": full-lock steering as before. "smooth": proportional steering.
+        steering = "bangbang",
+        smoothFullLockDegrees = 25.0,
+    },
+    timing = {
+        -- The frame-counted thresholds were tuned at about this FPS (measured
+        -- from dangis_vr_debug.log); they now follow real frame time instead.
+        referenceFps = 30,
+        minFrameScale = 0.25,
+        maxFrameScale = 2.0,
     },
     obstacle = {
         models = AVOID_OBJECT_MODELS,
         scanEveryFrames = 6,
+        -- Route points further away are not ray-cast; hits beyond ~62 m are ignored anyway.
+        corridorRadius = 70.0,
         maxTrailPoints = 30000,
     },
     recovery = {
@@ -171,17 +195,20 @@ local CONFIG = {
         bumpReverseHardMaxSeconds = 2.6,
         bumpReverseDistanceMin = 2.0,
         bumpReverseDistanceMax = 6.0,
-        bumpSteerMax = 72,
         bumpMinRecentSpeed = 2.0,
         bumpResyncBackPoints = 10,
         bumpResyncAheadPoints = 45,
         bumpResyncMaxDistance = 28.0,
-        bumpFreezeEscalateSeconds = 0.85,
+        bumpFreezeEscalateSeconds = 1.2,
         bumpFreezeEscalateDistance = 0.25,
         forwardNoProgressFrames = 44,
         forwardNoProgressGas = 80,
         forwardNoProgressSpeed = 8.0,
         forwardProgressEpsilon = 0.06,
+        refreshRetrySeconds = 0.75,
+        -- Freezes started by test_freeze.lua go through the same states but
+        -- only send a real /refresh to the server when this is true.
+        typeRefreshInFreezeTest = false,
     },
     dialog = {
         sharedFile = dialog_flag_file,
@@ -191,6 +218,7 @@ local CONFIG = {
         logToFile = true,
         logFile = debug_log_file,
         maxLogBytes = 65536,
+        trimCheckEvery = 50,
         categories = {
             route = true,
             obstacle = false,
@@ -202,46 +230,148 @@ local CONFIG = {
     },
 }
 
--- STATE is a debug/read-only mirror of legacy globals for now.
--- Do not use it as the source of truth until the old globals are fully migrated.
-local STATE = {
-    route = {
-        points = current_route,
-        name = current_name,
-    },
-    playback = {
-        playing = playing,
-        repeating = repeating,
-        paused = paused,
-        index = play_index,
-        pauseReason = pauseReleaseReason,
-    },
-    obstacle = S,
-    recovery = S,
-    admin = S,
-    dialog = S,
-    input = {
-        overrideActive = overrideActive,
-        steerBuffer = steerBuf,
-    },
-    vehicle = {
-        lastX = lastX,
-        lastY = lastY,
-        gas = gasLevel,
-        brake = brakeLevel,
-        steer = lastSteerValue,
-    },
-    pauseReasons = {
-        manual = false,
-        dialog = false,
-        admin = false,
-        obstacle = false,
-        recovery = false,
-    },
-}
+routeRadius = CONFIG.route.radius
+recordingDelay = CONFIG.route.recordingDelay
+LOOKAHEAD = CONFIG.route.lookahead
+current_name = CONFIG.route.defaultName
 
-local Utils = {}
-local Debug = {}
+-- Guarded raw memory reads (IsBadReadPtr) for dialog, entity and vehicle data.
+-- Plain FFI reads are used because readMemory inside pcall can kill a
+-- MoonLoader coroutine.
+local Mem = { ffi = nil, k32 = nil }
+
+function Mem.init()
+    if Mem.ffi ~= nil then return Mem.ffi ~= false end
+    local ok, ffi = pcall(require, "ffi")
+    if not ok then
+        Mem.ffi = false
+        return false
+    end
+    pcall(ffi.cdef, "int IsBadReadPtr(const void* lp, unsigned int ucb);")
+    local k32ok, k32 = pcall(ffi.load, "kernel32")
+    if not k32ok then
+        Mem.ffi = false
+        return false
+    end
+    Mem.ffi, Mem.k32 = ffi, k32
+    return true
+end
+
+function Mem.read(ctype, addr, size)
+    if not addr or addr < 0x10000 or addr > 0x7FFFFFFF then return nil end
+    if not Mem.init() then return nil end
+    if Mem.k32.IsBadReadPtr(Mem.ffi.cast("void*", addr), size) ~= 0 then return nil end
+    return tonumber(Mem.ffi.cast(ctype, addr)[0])
+end
+
+function Mem.readByte(addr) return Mem.read("uint8_t*", addr, 1) end
+function Mem.readWord(addr) return Mem.read("uint16_t*", addr, 2) end
+function Mem.readDword(addr) return Mem.read("uint32_t*", addr, 4) end
+function Mem.readFloat(addr) return Mem.read("float*", addr, 4) end
+
+-- Keyboard and focus helpers. Synthetic keys are only used to type chat
+-- commands, and only while this game's window is the active window, so
+-- nothing is ever typed into another program.
+local Win32 = { ready = nil, held = {}, focusCheckedAt = -1.0, focusCached = true }
+
+function Win32.init()
+    if Win32.ready ~= nil then return Win32.ready end
+    Win32.ready = false
+    local ok, ffi = pcall(require, "ffi")
+    if not ok then return false end
+    pcall(ffi.cdef, "void keybd_event(unsigned char bVk, unsigned char bScan, unsigned long dwFlags, unsigned long* dwExtraInfo);")
+    pcall(ffi.cdef, "short GetAsyncKeyState(int vKey);")
+    pcall(ffi.cdef, "short VkKeyScanA(char ch);")
+    pcall(ffi.cdef, "unsigned int MapVirtualKeyA(unsigned int uCode, unsigned int uMapType);")
+    pcall(ffi.cdef, "void* GetForegroundWindow(void);")
+    pcall(ffi.cdef, "unsigned long GetWindowThreadProcessId(void* hWnd, unsigned long* lpdwProcessId);")
+    pcall(ffi.cdef, "unsigned long GetCurrentProcessId(void);")
+    local u32ok, u32 = pcall(ffi.load, "user32")
+    if not u32ok then return false end
+    local k32ok, k32 = pcall(ffi.load, "kernel32")
+    Win32.ffi, Win32.u32 = ffi, u32
+    Win32.k32 = k32ok and k32 or nil
+    Win32.ready = true
+    return true
+end
+
+-- True while a window of this process (the game or SA-MP) is in front.
+-- Unknown -> true, which keeps the pre-5.49 behaviour.
+function Win32.isGameForeground()
+    local now = os.clock()
+    if now - Win32.focusCheckedAt < 0.05 then return Win32.focusCached end
+    Win32.focusCheckedAt = now
+    local focused = true
+    if Win32.init() and Win32.k32 then
+        local ok, result = pcall(function()
+            local hwnd = Win32.u32.GetForegroundWindow()
+            if hwnd == nil then return false end
+            local pid = Win32.ffi.new("unsigned long[1]")
+            Win32.u32.GetWindowThreadProcessId(hwnd, pid)
+            return tonumber(pid[0]) == tonumber(Win32.k32.GetCurrentProcessId())
+        end)
+        if ok then focused = result end
+    end
+    Win32.focusCached = focused
+    return focused
+end
+
+function Win32.keyDown(vk)
+    if not Win32.init() then return false end
+    local ok, state = pcall(Win32.u32.GetAsyncKeyState, vk)
+    state = ok and tonumber(state) or 0
+    return state < 0
+end
+
+-- Real keyboards always send a hardware scan code; games reading the
+-- keyboard through DirectInput ignore key events without one.
+function Win32.scanCode(vk)
+    local ok, scan = pcall(Win32.u32.MapVirtualKeyA, vk, 0)
+    scan = ok and tonumber(scan) or 0
+    return scan % 256
+end
+
+function Win32.press(vk)
+    if not Win32.init() then return false end
+    Win32.u32.keybd_event(vk, Win32.scanCode(vk), 0, nil)
+    Win32.held[vk] = true
+    return true
+end
+
+function Win32.release(vk)
+    if not Win32.init() then return false end
+    Win32.u32.keybd_event(vk, Win32.scanCode(vk), 2, nil) -- KEYEVENTF_KEYUP
+    Win32.held[vk] = nil
+    return true
+end
+
+function Win32.releaseHeld()
+    for vk in pairs(Win32.held) do
+        Win32.release(vk)
+    end
+end
+
+function Win32.releaseKeys(keys)
+    for _, vk in ipairs(keys) do
+        Win32.release(vk)
+    end
+end
+
+-- Optional MoonLoader functions, looked up once instead of on every call.
+local API = {}
+local function optionalApi(...)
+    for _, name in ipairs({...}) do
+        local fn = _G[name]
+        if type(fn) == "function" then return fn, name end
+    end
+    return nil, nil
+end
+API.objectModel, API.objectModelName = optionalApi("getObjectModel", "getObjectModelId", "getObjectModelID", "getObjectModelIndex")
+API.closestObject = optionalApi("getClosestObject")
+API.closestCar = optionalApi("getClosestCar")
+API.allObjects = optionalApi("getAllObjects")
+API.carPointer = optionalApi("getCarPointer")
+
 local RouteStorage = {}
 local RouteRecorder = {}
 local RouteFollower = {}
@@ -254,21 +384,35 @@ local MainLoop = {}
 
 local lastLoggedSharedState = nil
 
+-- Keeps the newest half of the log when it grows past maxLogBytes, instead of
+-- wiping it. Checked at startup and every trimCheckEvery writes.
 local function trimDebugLogFile()
     if not CONFIG.debug.logToFile then return end
     local path = CONFIG.debug.logFile or debug_log_file
-    local file = io.open(path, "r")
+    local maxBytes = CONFIG.debug.maxLogBytes or 65536
+    local file = io.open(path, "rb")
     if not file then return end
     local size = file:seek("end") or 0
-    file:close()
-    if size > (CONFIG.debug.maxLogBytes or 65536) then
-        local reset = io.open(path, "w")
-        if reset then
-            reset:write(string.format("[%.3f] [LOG] truncated old debug log\n", os.clock()))
-            reset:close()
-        end
+    if size <= maxBytes then
+        file:close()
+        return
     end
+    local keep = math.floor(maxBytes / 2)
+    file:seek("set", size - keep)
+    local tail = file:read("*a") or ""
+    file:close()
+    local firstNewline = tail:find("\n", 1, true)
+    if firstNewline then
+        tail = tail:sub(firstNewline + 1)
+    end
+    local out = io.open(path, "wb")
+    if not out then return end
+    out:write(string.format("[%.3f] [LOG] trimmed older entries\n", os.clock()))
+    out:write(tail)
+    out:close()
 end
+
+local logWritesSinceTrim = 0
 
 local function logEvent(category, message)
     if not CONFIG.debug.logToFile then return end
@@ -276,51 +420,63 @@ local function logEvent(category, message)
     if not file then return end
     file:write(string.format("[%.3f] [%s] %s\n", os.clock(), tostring(category or "INFO"), tostring(message or "")))
     file:close()
-end
-
-local function writeDriveControls(gas, brake)
-    if S and (S.freezeTestLatched or S.frozenByAdmin) then
-        gas = 0
-        brake = 0
+    logWritesSinceTrim = logWritesSinceTrim + 1
+    if logWritesSinceTrim >= (CONFIG.debug.trimCheckEvery or 50) then
+        logWritesSinceTrim = 0
+        trimDebugLogFile()
     end
-    writeMemory(CONFIG.controls.gasAddress, 1, gas or 0, false)
-    writeMemory(CONFIG.controls.brakeAddress, 1, brake or 0, false)
 end
 
-local function refreshStateView()
-    local now = os.clock()
-    STATE.route.points = current_route
-    STATE.route.name = current_name
-    STATE.playback.playing = playing
-    STATE.playback.repeating = repeating
-    STATE.playback.paused = paused
-    STATE.playback.index = play_index
-    STATE.playback.pauseReason = pauseReleaseReason
-    STATE.input.overrideActive = overrideActive
-    STATE.input.steerBuffer = steerBuf
-    STATE.vehicle.lastX = lastX
-    STATE.vehicle.lastY = lastY
-    STATE.vehicle.gas = gasLevel
-    STATE.vehicle.brake = brakeLevel
-    STATE.vehicle.steer = lastSteerValue
-    STATE.pauseReasons.manual = S.manualPaused
-    STATE.pauseReasons.dialog = S.dialogPaused or S.testArbotasPaused
-    STATE.pauseReasons.obstacle = S.bypassActive or collisionCooldown > 0
-    STATE.pauseReasons.admin = now < (S.rotateFightUntil or 0.0) or now < (S.rotateReleaseUntil or 0.0)
-    STATE.pauseReasons.recovery = S.freezeTestLatched
-        or S.frozenByAdmin
-        or S.bumpActive
-        or now < (S.backToForwardUntil or 0.0)
+local function clampPadValue(value)
+    value = math.floor(tonumber(value) or 0)
+    if value < 0 then return 0 end
+    if value > 255 then return 255 end
+    return value
+end
+
+-- Writes this frame's pedals into the game pad. Nothing is written while the
+-- route is not playing, so a stopped bot never overrides the player's keys.
+-- gas/brake are 0..255. reverse=true holds the brake button with no gas,
+-- which is how GTA reverses once the car has stopped.
+local function writeDriveControls(gas, brake, reverse)
+    reverseActive = false
+    if not playing then return end
+    if S.freezeTestLatched or S.frozenByAdmin then
+        gas, brake, reverse = 0, 0, false
+    end
+    local controls = CONFIG.controls
+    gas = clampPadValue(gas)
+    brake = clampPadValue(brake)
+    local footBrake, handbrake = 0, 0
+    if reverse then
+        gas = 0
+        footBrake = 255
+        reverseActive = true
+    elseif brake > 0 then
+        local forwardSpeed = S.forwardSpeed
+        if controls.brakeMode == "foot" and forwardSpeed ~= nil then
+            -- Holding the brake near standstill would start reversing.
+            if forwardSpeed > (controls.footBrakeMinSpeed or 1.0) then
+                footBrake = brake
+            end
+        else
+            handbrake = brake
+        end
+    end
+    writeMemory(controls.gasAddress, 2, gas, false)
+    writeMemory(controls.footBrakeAddress, 2, footBrake, false)
+    if controls.brakeMode ~= "foot" or handbrake > 0 then
+        writeMemory(controls.handbrakeAddress, 2, handbrake, false)
+    end
 end
 
 function dbg(category, message)
-    logEvent(category, message)
+    category = tostring(category or "INFO")
+    logEvent(category:upper(), message)
     if not CONFIG.debug.enabled then return end
-    if not CONFIG.debug.categories[category] then return end
-    printStringNow(string.format("~w~[%s] %s", tostring(category), tostring(message)), 1000)
+    if not CONFIG.debug.categories[category:lower()] then return end
+    printStringNow(string.format("~w~[%s] %s", category, tostring(message)), 1000)
 end
-
-Debug.log = dbg
 
 function resetObstacleBypass()
     S.avoidLateralTarget = 0.0
@@ -338,21 +494,12 @@ local function shouldAvoidObjectModel(modelId)
     return modelId ~= nil and AVOID_OBJECT_MODELS[modelId] == true
 end
 
-local function callObjectModelGetter(name, obj)
-    local fn = _G and _G[name] or nil
-    if type(fn) ~= "function" then return nil end
-    local ok, modelId = pcall(fn, obj)
+local function getAvoidObjectModel(obj)
+    if not obj or obj == 0 or not API.objectModel then return nil end
+    local ok, modelId = pcall(API.objectModel, obj)
     modelId = ok and tonumber(modelId) or nil
     if modelId and modelId > 0 then return modelId end
     return nil
-end
-
-local function getAvoidObjectModel(obj)
-    if not obj or obj == 0 then return nil end
-    return callObjectModelGetter("getObjectModel", obj)
-        or callObjectModelGetter("getObjectModelId", obj)
-        or callObjectModelGetter("getObjectModelID", obj)
-        or callObjectModelGetter("getObjectModelIndex", obj)
 end
 
 local function isAvoidableObject(obj)
@@ -371,18 +518,33 @@ local function readObjectCoordinates(obj)
     return true, a, b, c
 end
 
-local function collisionObjectModelId(colPoint)
+-- processLineOfSight reports the hit entity as a raw CEntity pointer, not a
+-- script handle, so its type and model are read from the entity itself.
+local function collisionEntityPointer(colPoint)
     if not colPoint then return nil end
-    local ok, modelId = pcall(function()
-        return tonumber(colPoint.modelId or colPoint.modelID or colPoint.model or colPoint.modelIndex)
-    end)
-    modelId = ok and modelId or nil
-    if modelId then return modelId end
-    local entityOk, entity = pcall(function()
-        return colPoint.entity or colPoint.object or colPoint.handle or colPoint.entityHandle
-    end)
-    if not entityOk then return nil end
-    return getAvoidObjectModel(entity)
+    local ok, entity = pcall(function() return colPoint.entity end)
+    entity = ok and tonumber(entity) or nil
+    if entity and entity >= 0x10000 then return entity end
+    return nil
+end
+
+local function collisionObjectModelId(colPoint)
+    local entity = collisionEntityPointer(colPoint)
+    if not entity then return nil end
+    local modelId = Mem.readWord(entity + 0x22) -- CEntity::m_nModelIndex
+    if modelId and modelId > 0 then return modelId end
+    return nil
+end
+
+-- GTA entity types: 1 building, 2 vehicle, 3 ped, 4 object, 5 dummy.
+local function collisionEntityType(colPoint)
+    if not colPoint then return nil end
+    local ok, entityType = pcall(function() return colPoint.entityType end)
+    entityType = ok and tonumber(entityType) or nil
+    if entityType then return entityType end
+    local entity = collisionEntityPointer(colPoint)
+    local typeByte = entity and Mem.readByte(entity + 0x36) -- low 3 bits = m_nType
+    return typeByte and (typeByte % 8) or nil
 end
 
 local function normalizeDriveMode(value)
@@ -409,17 +571,6 @@ end
 local function routeDriveModeAt(route, idx)
     local p = type(route) == "table" and route[idx] or nil
     return normalizeDriveMode(p and (p.drive or p.mode or p.reverse) or DRIVE_FORWARD)
-end
-
-local function hasDriveModeRun(route, idx, mode, needed)
-    if type(route) ~= "table" then return false end
-    needed = needed or 3
-    local last = math.min(#route, idx + needed - 1)
-    if last - idx + 1 < needed then return false end
-    for i = idx, last do
-        if routeDriveModeAt(route, i) ~= mode then return false end
-    end
-    return true
 end
 
 local function getPlaybackDriveMode(route, idx)
@@ -451,13 +602,11 @@ local function copyStorageFile(src, dst)
     return true
 end
 
+-- GTA headings run counter-clockwise from north: the nose points along
+-- (-sin h, cos h).
 local function getRecordingForwardAxes(heading)
     local h = math.rad(heading or 0.0)
-    local fx = -math.sin(h)
-    local fy = -math.cos(h)
-    local len = math.sqrt(fx * fx + fy * fy)
-    if len < 0.1 then return 0.0, 1.0 end
-    return fx / len, fy / len
+    return -math.sin(h), math.cos(h)
 end
 
 local function normalizeRouteReverseFlags(route)
@@ -485,23 +634,23 @@ local function saveRoute(name, route)
                 p.x, p.y, p.z, p.speed, p.heading, drive))
         end
         file:close()
+        -- The previous recording stays available as <name>.txt.bak.
         os.remove(bakPath)
         if storageFileExists(path) then
             if not os.rename(path, bakPath) then
+                copyStorageFile(path, bakPath)
                 os.remove(path)
             end
         end
         if os.rename(tmpPath, path) then
-            os.remove(bakPath)
             return true
         end
         if copyStorageFile(tmpPath, path) then
             os.remove(tmpPath)
-            os.remove(bakPath)
             return true
         end
         if storageFileExists(bakPath) then
-            os.rename(bakPath, path)
+            copyStorageFile(bakPath, path)
         end
         os.remove(tmpPath)
     end
@@ -567,10 +716,19 @@ local function getSplineTarget(route, idx)
 end
 
 local function turning_mechanism(posX, posY, carPosX, carPosY, car)
-    local heading = math.rad(getHeadingFromVector2d(posX - carPosX, posY - carPosY) + math.abs(getCarHeading(car) - 360.0))
-    local heading = getHeadingFromVector2d(math.deg(math.sin(heading)), math.deg(math.cos(heading)))
+    local relative = math.rad(getHeadingFromVector2d(posX - carPosX, posY - carPosY) + math.abs(getCarHeading(car) - 360.0))
+    local heading = getHeadingFromVector2d(math.deg(math.sin(relative)), math.deg(math.cos(relative)))
     local steer
-    if heading > 180.0 and 355.0 > heading then
+    if CONFIG.controls.steering == "smooth" then
+        -- Signed angle to the target: positive = target on the right.
+        local err = heading <= 180.0 and heading or heading - 360.0
+        local fullLock = CONFIG.controls.smoothFullLockDegrees or 25.0
+        if math.abs(err) < 0.75 then
+            steer = 0
+        else
+            steer = math.floor(clamp(err / fullLock * 128.0, -128.0, 128.0) + 0.5)
+        end
+    elseif heading > 180.0 and 355.0 > heading then
         steer = -128
     elseif heading > 5.0 and 180.0 >= heading then
         steer = 128
@@ -583,48 +741,12 @@ local function turning_mechanism(posX, posY, carPosX, carPosY, car)
     setGameKeyState(0, steer)
 end
 
-local function ensureReverseKeyApi()
-    if reverseKeyFfi == false then return nil end
-    if reverseKeyFfi and reverseKeyUser32 then return reverseKeyUser32 end
-    local ok, ffi = pcall(require, "ffi")
-    if not ok then
-        reverseKeyFfi = false
-        return nil
-    end
-    pcall(ffi.cdef, [[
-        void keybd_event(unsigned char, unsigned char, unsigned long, unsigned long*);
-        short GetAsyncKeyState(int vKey);
-    ]])
-    local u32ok, u32 = pcall(ffi.load, "user32")
-    if not u32ok then
-        reverseKeyFfi = false
-        return nil
-    end
-    reverseKeyFfi, reverseKeyUser32 = ffi, u32
-    return reverseKeyUser32
-end
-
+-- Player input only counts while the game window is active; keys typed into
+-- other programs must not trigger OVERRIDE.
 local function isPhysicalKeyDown(vk)
+    if not Win32.isGameForeground() then return false end
     if isKeyDown(vk) then return true end
-    local u32 = ensureReverseKeyApi()
-    if not u32 or not u32.GetAsyncKeyState then return false end
-    local ok, state = pcall(u32.GetAsyncKeyState, vk)
-    state = ok and tonumber(state) or 0
-    return state < 0 or state >= 0x8000
-end
-
-local function setSyntheticReverseKey(active, force)
-    active = active == true
-    local u32 = ensureReverseKeyApi()
-    if not u32 then return end
-    if not force and syntheticReverseKeyDown == active then return end
-    if active then
-        u32.keybd_event(0x53, 0, 0, nil)
-        syntheticReverseKeyDown = true
-    else
-        u32.keybd_event(0x53, 0, 2, nil)
-        syntheticReverseKeyDown = false
-    end
+    return Win32.keyDown(vk)
 end
 
 local function fileExists(path)
@@ -644,24 +766,42 @@ local function readSharedFile(path)
     return value
 end
 
+local lastSharedStateText = nil
+local lastSharedStateWriteAt = -1.0
+
+-- Read by hud_aswd.lua and test_freeze.lua. A new state is written at once;
+-- an unchanged one at most every 50 ms instead of every frame.
+-- Lines: state, gas, brake, steer, timestamp, reversing (1/0).
 local function writeSharedState(state)
     state = tostring(state or "IDLE")
+    local now = os.clock()
+    if state == lastSharedStateText and now - lastSharedStateWriteAt < 0.05 then return end
     local file = io.open(shared_state_file, "w")
     if not file then return end
     file:write(state .. "\n")
     file:write(tostring(math.floor(gasLevel or 0)) .. "\n")
     file:write(tostring(math.floor(brakeLevel or 0)) .. "\n")
     file:write(tostring(math.floor(lastSteerValue or 0)) .. "\n")
-    file:write(string.format("%.3f\n", os.clock()))
+    file:write(string.format("%.3f\n", now))
+    file:write((reverseActive and "1" or "0") .. "\n")
     file:close()
+    lastSharedStateText = state
+    lastSharedStateWriteAt = now
     if state ~= lastLoggedSharedState then
         logEvent("STATE", tostring(lastLoggedSharedState or "nil") .. " -> " .. state)
         lastLoggedSharedState = state
     end
 end
 
+-- test_freeze.lua signals through dangis_vr_freeze.flag (checked at most every 50 ms).
+local freezeFlagCached, freezeFlagCheckedAt = false, -1.0
 local function sharedFreezeActive()
-    return _G.VR_TEST_FREEZE == true or fileExists(freeze_flag_file)
+    local now = os.clock()
+    if now - freezeFlagCheckedAt >= 0.05 then
+        freezeFlagCached = fileExists(freeze_flag_file)
+        freezeFlagCheckedAt = now
+    end
+    return freezeFlagCached
 end
 
 local function freezeRecoveryOwnsControls()
@@ -684,35 +824,18 @@ end
 
 function clearRotateTrigger()
     os.remove(rotate_flag_file)
-    _G.VR_ADMIN_ROTATED = false
 end
 
 local function sharedDialogMode()
     return readSharedFile(dialog_flag_file)
 end
 
-local safeFfi, safeK32 = nil, nil
-local function safeReadDword(addr)
-    if not addr or addr < 0x10000 or addr > 0x7FFFFFFF then return nil end
-    if safeFfi == nil then
-        local ok, ffi = pcall(require, "ffi")
-        if not ok then safeFfi = false; return nil end
-        pcall(ffi.cdef, "int IsBadReadPtr(const void* lp, unsigned int ucb);")
-        local k32ok, k32 = pcall(ffi.load, "kernel32")
-        if not k32ok then safeFfi = false; return nil end
-        safeFfi, safeK32 = ffi, k32
-    end
-    if not safeFfi or not safeK32 then return nil end
-    if safeK32.IsBadReadPtr(safeFfi.cast("void*", addr), 4) ~= 0 then return nil end
-    return tonumber(safeFfi.cast("uint32_t*", addr)[0])
-end
-
 local function isSampDialogActive()
     if samp == 0 then return false end
-    local dPtr = safeReadDword(samp + 0x21A0B8)
+    local dPtr = Mem.readDword(samp + 0x21A0B8)
     if not dPtr or dPtr == 0 then return false end
     if dPtr < 0x01000000 or dPtr > 0x7FFFFFFF then return false end
-    return safeReadDword(dPtr + 0x28) == 1
+    return Mem.readDword(dPtr + 0x28) == 1
 end
 
 function hasPauseSource(now)
@@ -738,18 +861,15 @@ function syncPausedState(now)
 end
 
 local function releaseControls(reason)
-    setSyntheticReverseKey(false, true)
     pauseReleaseReason = reason or pauseReleaseReason or "SAFE"
     gasLevel = 0
     brakeLevel = 0
     lastSteerValue = 0
-    setGameKeyState(0, 0)
-    writeDriveControls(0, 0)
-    _G.VR_gas = 0
-    _G.VR_brake = 0
-    _G.VR_steer = 0
-    _G.VR_state = pauseReleaseReason
-    _G.VR_playing = os.clock()
+    if playing then
+        setGameKeyState(0, 0)
+        writeDriveControls(0, 0)
+    end
+    reverseActive = false
     writeSharedState(pauseReleaseReason)
 end
 
@@ -762,14 +882,8 @@ local function pressRotateReaction()
     gasLevel = 255
     brakeLevel = 0
     lastSteerValue = 0
-    setSyntheticReverseKey(false, true)
     setGameKeyState(0, 0)
     writeDriveControls(255, 0)
-    _G.VR_gas = gasLevel
-    _G.VR_brake = brakeLevel
-    _G.VR_steer = lastSteerValue
-    _G.VR_state = pauseReleaseReason
-    _G.VR_playing = os.clock()
     writeSharedState(pauseReleaseReason)
 end
 
@@ -780,6 +894,22 @@ local function findNearestWaypoint(route, carX, carY)
         if d < bestDist then bestDist = d; best = i end
     end
     return best
+end
+
+-- Nearest point searched around the current index first, so a route that
+-- crosses or runs close to itself cannot make the bot jump to another part of
+-- the lap. Falls back to the whole route when nothing nearby is within maxDist.
+local function findNearestWaypointNear(route, carX, carY, centerIdx, back, ahead, maxDist)
+    local n = #route
+    if n == 0 then return 1 end
+    centerIdx = math.max(1, math.min(tonumber(centerIdx) or 1, n))
+    local best, bestDist = centerIdx, math.huge
+    for i = math.max(1, centerIdx - back), math.min(n, centerIdx + ahead) do
+        local d = getDistanceBetweenCoords2d(carX, carY, route[i].x, route[i].y)
+        if d < bestDist then bestDist = d; best = i end
+    end
+    if bestDist <= maxDist then return best end
+    return findNearestWaypoint(route, carX, carY)
 end
 
 local function resetForwardNoProgress()
@@ -820,15 +950,15 @@ local function startFreezeRecovery(mode)
         math.floor((CONFIG.recovery.freezeResumeDelayMinSeconds or 0.5) * 1000),
         math.floor((CONFIG.recovery.freezeResumeDelayMaxSeconds or 1.0) * 1000)
     ) / 1000.0
-    setSyntheticReverseKey(false, true)
     resetBumpState(false)
     S.backToForwardUntil = 0.0
     S.freezeTestLatched = true
     S.freezeRecoveryMode = mode or "real"
     S.frozenByAdmin = true
     S.refreshSent = false
+    S.refreshJob = nil
+    S.refreshBlockedReason = nil
     S.freezeRefreshSentAt = 0.0
-    S.freezeFightUntil = 0.0
     S.freezeRefreshAt = now + waitBeforeRefresh
     S.freezeReleaseUntil = 0.0
     S.freezeResumeDelay = resumeDelay
@@ -847,7 +977,7 @@ local function resetFreezeRecovery()
         local car = storeCarCharIsInNoSave(PLAYER_PED)
         cx, cy = getCarCoordinates(car)
         if playing and #current_route > 0 then
-            play_index = findNearestWaypoint(current_route, cx, cy)
+            play_index = findNearestWaypointNear(current_route, cx, cy, play_index, 20, 150, 25.0)
         end
     end
 
@@ -855,12 +985,15 @@ local function resetFreezeRecovery()
     S.freezeRecoveryMode = ""
     S.frozenByAdmin = false
     S.refreshSent = false
+    S.refreshJob = nil
+    -- A test flag that is still set has been handled: hold still until it is
+    -- removed instead of starting another recovery (and another /refresh).
+    S.externalFreezeAck = sharedFreezeActive()
     S.freezeRefreshSentAt = 0.0
-    S.freezeFightUntil = 0.0
     S.freezeReleaseUntil = 0.0
     S.freezeRefreshAt = 0.0
     S.freezeResumeDelay = 0.0
-    S.freezeRecoveryGraceUntil = os.clock() + 2.1
+    S.freezeRecoveryGraceUntil = os.clock() + (CONFIG.recovery.freezeRecoveryGraceSeconds or 2.1)
     S.reversePlaybackGraceUntil = 0.0
     S.backToForwardUntil = 0.0
     resetBumpState(true)
@@ -873,8 +1006,6 @@ local function resetFreezeRecovery()
     S.routeObstacleTimer = 0
     S.obstacleHits = {}
     S.obstacleProbes = {}
-    S.rejoinFrames = 0
-    S.rejoinSteer = 0
     S.rejoinCooldownUntil = 0.0
     S.rejoinDisableUntil = os.clock() + 2.5
     resetObstacleBypass()
@@ -928,6 +1059,12 @@ function clamp(value, low, high)
     if value < low then return low end
     if value > high then return high end
     return value
+end
+
+-- Per-frame smoothing rates were tuned at CONFIG.timing.referenceFps; this
+-- gives the same response per second at any frame rate.
+local function scaledLerp(rate)
+    return 1.0 - (1.0 - rate) ^ frameScale
 end
 
 local function obstacleUrgency(hit)
@@ -1025,7 +1162,7 @@ function updateObstacleBypass(now)
         if S.routeObstacleDist < 14.0 then wantedOffset = math.max(wantedOffset, 2.90) end
         wantedOffset = clamp(wantedOffset, 2.20, 3.25)
 
-        S.bypassOffset = S.bypassOffset + (wantedOffset - S.bypassOffset) * 0.16
+        S.bypassOffset = S.bypassOffset + (wantedOffset - S.bypassOffset) * scaledLerp(0.16)
         S.bypassOffset = clamp(S.bypassOffset, 0.0, 3.25)
         local hold = math.max(2.6, math.min(5.4, 1.9 + S.routeObstacleDist * 0.05 + (S.avoidClusterCount or 0) * 0.22))
         S.bypassHoldUntil = math.max(S.bypassHoldUntil or 0.0, now + hold)
@@ -1041,7 +1178,7 @@ function updateObstacleBypass(now)
         end
 
         S.bypassReturning = true
-        S.avoidLateralTarget = (S.avoidLateralTarget or 0.0) * 0.985
+        S.avoidLateralTarget = (S.avoidLateralTarget or 0.0) * (0.985 ^ frameScale)
         S.bypassOffset = math.abs(S.avoidLateralTarget)
         if math.abs(S.avoidLateralTarget) < 0.08 and math.abs(S.currentLateral or 0.0) < 0.18 then
             resetObstacleBypass()
@@ -1148,18 +1285,17 @@ local function showMsg(text)
     printStringNow(text, 2000)
 end
 
-Debug.showMessage = showMsg
-
 local function applySteerNoise()
     if steerNoiseDuration > 0 then
         steerNoiseDuration = steerNoiseDuration - 1
+        lastSteerValue = 0
         setGameKeyState(0, 0)
     elseif steerNoiseCooldown > 0 then
         steerNoiseCooldown = steerNoiseCooldown - 1
     elseif math.random(100) <= 10 then
-        steerNoiseValue = 0
         steerNoiseDuration = math.random(1, 3)
         steerNoiseCooldown = math.random(8, 30)
+        lastSteerValue = 0
         setGameKeyState(0, 0)
     end
 end
@@ -1197,7 +1333,7 @@ local function getObstacleAhead(car, targetX, targetY)
         end
     end
     if bestHit then
-        return bestHit.x, bestHit.y, bestHit.z or 0, bestHit.avoidDir or 0, bestHit.worldDist, bestHit.sideScan == true, bestHit.urgency or obstacleUrgency(bestHit)
+        return bestHit.x, bestHit.y, bestHit.avoidDir or 0, bestHit.worldDist, bestHit.sideScan == true, bestHit.urgency or obstacleUrgency(bestHit)
     end
 
     local carX, carY, carZ = getCarCoordinates(car)
@@ -1208,17 +1344,21 @@ local function getObstacleAhead(car, targetX, targetY)
     local nx, ny = dx / d, dy / d
     local checkX = carX + nx * 12
     local checkY = carY + ny * 12
-    local ok1, nearest = pcall(getClosestCar, checkX, checkY, carZ, 5.0, {}, 0)
-    if ok1 and nearest and nearest ~= 0 and nearest ~= car then
-        local ox, oy = getCarCoordinates(nearest)
-        return ox, oy, carZ, 0, getDistanceBetweenCoords2d(carX, carY, ox, oy), false, 0.65
+    if API.closestCar then
+        local ok1, nearest = pcall(API.closestCar, checkX, checkY, carZ, 5.0, {}, 0)
+        if ok1 and nearest and nearest ~= 0 and nearest ~= car then
+            local ox, oy = getCarCoordinates(nearest)
+            return ox, oy, 0, getDistanceBetweenCoords2d(carX, carY, ox, oy), false, 0.65
+        end
     end
-    local ok2, nearObj = pcall(getClosestObject, checkX, checkY, carZ, 4.0, false, false)
-    if ok2 and nearObj and nearObj ~= 0 then
-        local avoidable = isAvoidableObject(nearObj)
-        if not avoidable then return nil end
-        local ok3, ox, oy = readObjectCoordinates(nearObj)
-        if ok3 and ox then return ox, oy, carZ, 0, getDistanceBetweenCoords2d(carX, carY, ox, oy), false, 0.60 end
+    if API.closestObject then
+        local ok2, nearObj = pcall(API.closestObject, checkX, checkY, carZ, 4.0, false, false)
+        if ok2 and nearObj and nearObj ~= 0 then
+            local avoidable = isAvoidableObject(nearObj)
+            if not avoidable then return nil end
+            local ok3, ox, oy = readObjectCoordinates(nearObj)
+            if ok3 and ox then return ox, oy, 0, getDistanceBetweenCoords2d(carX, carY, ox, oy), false, 0.60 end
+        end
     end
     return nil
 end
@@ -1260,23 +1400,37 @@ local function sharpTurnAhead(route, idx)
     return false
 end
 
+-- GTA headings run counter-clockwise from north, so the nose points along
+-- (-sin h, cos h). Returns forward x/y and left x/y.
 local function getCarForwardAxes(car)
     local heading = math.rad(getCarHeading(car))
-    local nx = math.sin(heading)
+    local nx = -math.sin(heading)
     local ny = math.cos(heading)
-    local len = math.sqrt(nx * nx + ny * ny)
-    if len < 0.1 then return 0.0, 1.0, -1.0, 0.0 end
-    nx, ny = nx / len, ny / len
     return nx, ny, -ny, nx
 end
 
+-- Signed speed along the car's nose in getCarSpeed units (m/s): positive =
+-- rolling forward, negative = rolling backward, nil if it cannot be read.
+local function getCarForwardSpeed(car)
+    if not API.carPointer then return nil end
+    local ok, ptr = pcall(API.carPointer, car)
+    ptr = ok and tonumber(ptr) or nil
+    if not ptr or ptr == 0 then return nil end
+    local vx = Mem.readFloat(ptr + 0x44) -- CPhysical::m_vecMoveSpeed
+    local vy = Mem.readFloat(ptr + 0x48)
+    if not vx or not vy then return nil end
+    local fx, fy = getCarForwardAxes(car)
+    return (vx * fx + vy * fy) * 50.0
+end
+
+-- Skips play_index ahead when the car has already passed its target point.
 function handleRouteRejoinRecovery(car, carX, carY, targetX, targetY, currentSpeed)
     local now = os.clock()
     if now < (S.rejoinDisableUntil or 0.0) or now < (S.rejoinCooldownUntil or 0.0) then
-        return false
+        return
     end
     if play_index <= 20 or #current_route == 0 or currentSpeed > 25.0 then
-        return false
+        return
     end
 
     local fx, fy, lx, ly = getCarForwardAxes(car)
@@ -1287,7 +1441,7 @@ function handleRouteRejoinRecovery(car, carX, carY, targetX, targetY, currentSpe
     local dist = math.sqrt(relX * relX + relY * relY)
 
     if forward > -1.5 or dist > 22.0 or math.abs(lateral) < 2.0 then
-        return false
+        return
     end
 
     local bestIdx, bestScore = nil, math.huge
@@ -1308,17 +1462,12 @@ function handleRouteRejoinRecovery(car, carX, carY, targetX, targetY, currentSpe
 
     if bestIdx then
         play_index = bestIdx
-        S.rejoinFrames = 0
-        S.rejoinSteer = 0
         S.rejoinCooldownUntil = now + 1.5
         S.currentLateral = 0.0
         resetObstacleBypass()
         S.avoidClusterCount = 0
-        _G.VR_state = "REJOIN_SKIP"
-        _G.VR_playing = now
         writeSharedState("REJOIN_SKIP")
     end
-    return false
 end
 
 local function pointSegmentProjection(ax, ay, bx, by, px, py)
@@ -1479,13 +1628,12 @@ local function readControlByte(address)
     return tonumber(value) or 0
 end
 
-local function isReverseRecordingInputActive(car)
+local function isReverseRecordingInputActive()
     local sDown = isPhysicalKeyDown(0x53)
     local wDown = isPhysicalKeyDown(0x57)
-    local brakeInput = readControlByte(CONFIG.controls.brakeAddress)
-    local ok, speed = pcall(getCarSpeed, car)
-    return ((sDown or brakeInput > 150) and not wDown)
-        or (ok and speed and speed < -0.35)
+    -- Pad Square is the brake/reverse button (keyboard S or a gamepad).
+    local brakeInput = readControlByte(CONFIG.controls.footBrakeAddress)
+    return (sDown or brakeInput > 150) and not wDown
 end
 
 local function getRecordedForwardMotion(car, heading, prev, x, y)
@@ -1580,7 +1728,6 @@ local function scanRouteAhead(route, idx, car)
         if sideScan and worldDist < 8.0 and clearance < 2.8 then
             threat = threat - 2.8
         end
-        if kind == "solid" then threat = threat - 2.0 end
         local existing = found[key]
 
         if worldDist > minWorldDist and lateralDist < maxLateral and (not sideScan or clearance < 5.2) and (not existing or threat < existing.threat) then
@@ -1605,10 +1752,11 @@ local function scanRouteAhead(route, idx, car)
         end
     end
 
+    -- GTA entity types: 1 building, 2 vehicle, 3 ped, 4 object, 5 dummy.
     local function classifyEntityType(entityType)
         if entityType == 2 then return "car" end
         if entityType == 3 then return "ped" end
-        if entityType == 1 then return "obj" end
+        if entityType == 4 then return "obj" end
         return "solid"
     end
 
@@ -1632,11 +1780,12 @@ local function scanRouteAhead(route, idx, car)
             sampleX, sampleY, probeToZ,
             true, true, false, true, true, false, false, false)
         if ok and result and colPoint and colPoint.pos then
-            local kind = classifyEntityType(colPoint.entityType)
+            local entityType = collisionEntityType(colPoint)
+            local kind = classifyEntityType(entityType)
             local modelId = collisionObjectModelId(colPoint)
-            if shouldAvoidObjectModel(modelId) then
+            if (entityType == 4 or entityType == nil) and shouldAvoidObjectModel(modelId) then
                 kind = "obj"
-            elseif kind == "obj" or kind == "solid" or kind == "ped" then
+            elseif kind ~= "car" then
                 return
             end
             local hx, hy, hz = colPoint.pos[1], colPoint.pos[2], colPoint.pos[3]
@@ -1676,7 +1825,8 @@ local function scanRouteAhead(route, idx, car)
 
     local function sampleNearbyObject(centerX, centerY, centerZ, routeIdx, avoidDirHint, radius)
         local sideScan = math.abs(avoidDirHint or 0) > 1
-        local ok, obj = pcall(getClosestObject, centerX, centerY, centerZ, radius or 1.85, false, false)
+        if not API.closestObject then return end
+        local ok, obj = pcall(API.closestObject, centerX, centerY, centerZ, radius or 1.85, false, false)
         if not ok or not obj or obj == 0 then return end
         local avoidable, modelId = isAvoidableObject(obj)
         if not avoidable then return end
@@ -1758,7 +1908,8 @@ local function scanRouteAhead(route, idx, car)
     end
 
     local function scanStreamedObjects()
-        local ok, objects = pcall(getAllObjects)
+        if not API.allObjects then return end
+        local ok, objects = pcall(API.allObjects)
         if not ok or type(objects) ~= "table" then return end
         local scanned = 0
         for _, obj in pairs(objects) do
@@ -1985,35 +2136,40 @@ local function scanRouteAhead(route, idx, car)
     local routeDot = routeLen > 0.1 and ((routeDx / routeLen) * carForwardX + (routeDy / routeLen) * carForwardY) or 1.0
     local scanRouteCorridor = routeDot > -0.25 or getCarSpeed(car) < 5.0
 
+    -- Only ray-cast route points near the car: hits further than ~62 m never
+    -- influence avoidance, and the far corridor was most of the scan cost.
+    local corridorRadius = CONFIG.obstacle.corridorRadius or 70.0
     for i = idx + 6, scanRouteCorridor and math.min(idx + 320, n) or idx + 5, 3 do
         local p = route[i]
         local prev = route[math.max(1, i - 1)]
-        local prevZ = (prev.z or carZ) + 0.45
-        local pz = (p.z or carZ) + 0.45
-        samplePoint(prev.x, prev.y, prevZ, p.x, p.y, pz, i, 0)
-        local segX = p.x - prev.x
-        local segY = p.y - prev.y
-        local segLen = math.sqrt(segX * segX + segY * segY)
-        if segLen > 0.1 then
-            local lx = -segY / segLen
-            local ly = segX / segLen
-            local laneOffset = 1.2
-            local shoulderOffset = 2.3
-            local outerOffset = 3.4
-            samplePoint(prev.x + lx * laneOffset, prev.y + ly * laneOffset, prevZ, p.x + lx * laneOffset, p.y + ly * laneOffset, pz, i, -1)
-            samplePoint(prev.x - lx * laneOffset, prev.y - ly * laneOffset, prevZ, p.x - lx * laneOffset, p.y - ly * laneOffset, pz, i, 1)
-            if ((i - idx) % 6) == 0 and (i - idx) <= 180 then
-                sampleNearbyObject(p.x, p.y, pz, i, 0, 1.8)
-                sampleNearbyObject(p.x + lx * laneOffset, p.y + ly * laneOffset, pz, i, -1, 1.55)
-                sampleNearbyObject(p.x - lx * laneOffset, p.y - ly * laneOffset, pz, i, 1, 1.55)
-            end
-            if ((i - idx) % 6) == 0 then
-                samplePoint(prev.x + lx * shoulderOffset, prev.y + ly * shoulderOffset, prevZ, p.x + lx * shoulderOffset, p.y + ly * shoulderOffset, pz, i, -2)
-                samplePoint(prev.x - lx * shoulderOffset, prev.y - ly * shoulderOffset, prevZ, p.x - lx * shoulderOffset, p.y - ly * shoulderOffset, pz, i, 2)
-            end
-            if ((i - idx) % 9) == 0 then
-                samplePoint(prev.x + lx * outerOffset, prev.y + ly * outerOffset, prevZ, p.x + lx * outerOffset, p.y + ly * outerOffset, pz, i, -2)
-                samplePoint(prev.x - lx * outerOffset, prev.y - ly * outerOffset, prevZ, p.x - lx * outerOffset, p.y - ly * outerOffset, pz, i, 2)
+        if getDistanceBetweenCoords2d(carX, carY, p.x, p.y) <= corridorRadius then
+            local prevZ = (prev.z or carZ) + 0.45
+            local pz = (p.z or carZ) + 0.45
+            samplePoint(prev.x, prev.y, prevZ, p.x, p.y, pz, i, 0)
+            local segX = p.x - prev.x
+            local segY = p.y - prev.y
+            local segLen = math.sqrt(segX * segX + segY * segY)
+            if segLen > 0.1 then
+                local lx = -segY / segLen
+                local ly = segX / segLen
+                local laneOffset = 1.2
+                local shoulderOffset = 2.3
+                local outerOffset = 3.4
+                samplePoint(prev.x + lx * laneOffset, prev.y + ly * laneOffset, prevZ, p.x + lx * laneOffset, p.y + ly * laneOffset, pz, i, -1)
+                samplePoint(prev.x - lx * laneOffset, prev.y - ly * laneOffset, prevZ, p.x - lx * laneOffset, p.y - ly * laneOffset, pz, i, 1)
+                if ((i - idx) % 6) == 0 and (i - idx) <= 180 then
+                    sampleNearbyObject(p.x, p.y, pz, i, 0, 1.8)
+                    sampleNearbyObject(p.x + lx * laneOffset, p.y + ly * laneOffset, pz, i, -1, 1.55)
+                    sampleNearbyObject(p.x - lx * laneOffset, p.y - ly * laneOffset, pz, i, 1, 1.55)
+                end
+                if ((i - idx) % 6) == 0 then
+                    samplePoint(prev.x + lx * shoulderOffset, prev.y + ly * shoulderOffset, prevZ, p.x + lx * shoulderOffset, p.y + ly * shoulderOffset, pz, i, -2)
+                    samplePoint(prev.x - lx * shoulderOffset, prev.y - ly * shoulderOffset, prevZ, p.x - lx * shoulderOffset, p.y - ly * shoulderOffset, pz, i, 2)
+                end
+                if ((i - idx) % 9) == 0 then
+                    samplePoint(prev.x + lx * outerOffset, prev.y + ly * outerOffset, prevZ, p.x + lx * outerOffset, p.y + ly * outerOffset, pz, i, -2)
+                    samplePoint(prev.x - lx * outerOffset, prev.y - ly * outerOffset, prevZ, p.x - lx * outerOffset, p.y - ly * outerOffset, pz, i, 2)
+                end
             end
         end
     end
@@ -2063,16 +2219,11 @@ local function scanRouteAhead(route, idx, car)
     return best, bestDir, bestUrgency
 end
 
+-- The bot reverses through the pad, not the S key, so any W/A/S/D/Space
+-- press seen here is the player.
 local function isPlayerControlling()
-    local reverseKey = isPhysicalKeyDown(0x53)
-    local botReverseOwner = syntheticReverseKeyDown
-        or S.bumpActive
-        or os.clock() < (S.backToForwardUntil or 0.0)
-    if botReverseOwner and reverseKey then
-        reverseKey = false
-    end
     return isPhysicalKeyDown(0x57)
-        or reverseKey
+        or isPhysicalKeyDown(0x53)
         or isPhysicalKeyDown(0x41)
         or isPhysicalKeyDown(0x44)
         or isPhysicalKeyDown(0x20)
@@ -2082,7 +2233,7 @@ local function isReversePlaybackContext(route, pidx)
     if not playing or type(route) ~= "table" or #route == 0 then return false end
     pidx = math.max(1, math.min(tonumber(pidx) or 1, #route))
     local first = math.max(1, pidx - 2)
-    local last = math.min(#route, pidx + (CONFIG.recovery.reverseLookaheadPoints or 24))
+    local last = math.min(#route, pidx + (CONFIG.recovery.reverseLookaheadPoints or 90))
     local here = route[pidx]
     for i = first, last do
         local p = route[i]
@@ -2115,8 +2266,8 @@ local function clearFreezeRecoveryOnly(now)
     S.freezeRecoveryMode = ""
     S.frozenByAdmin = false
     S.refreshSent = false
+    S.refreshJob = nil
     S.freezeRefreshSentAt = 0.0
-    S.freezeFightUntil = 0.0
     S.freezeReleaseUntil = 0.0
     S.freezeRefreshAt = 0.0
     S.freezeResumeDelay = 0.0
@@ -2150,7 +2301,6 @@ local function startBackToForwardTransition()
     gasLevel = 0
     brakeLevel = 0
     lastSteerValue = 0
-    setSyntheticReverseKey(false, true)
     setGameKeyState(0, 0)
     writeDriveControls(0, 0)
     return true
@@ -2170,16 +2320,15 @@ local function handleBackToForwardTransition()
 end
 
 local function stopBumpRecovery(reason)
-    setSyntheticReverseKey(false, true)
     resetBumpState(false)
     gasLevel = 0
     brakeLevel = 0
     lastSteerValue = 0
-    setGameKeyState(0, 0)
+    if playing then
+        setGameKeyState(0, 0)
+    end
     writeDriveControls(0, 0)
     if reason then
-        _G.VR_state = reason
-        _G.VR_playing = os.clock()
         writeSharedState(reason)
     end
 end
@@ -2214,20 +2363,12 @@ local function startBumpRecovery(car, route, pidx, reason)
     if recent < (CONFIG.recovery.bumpMinRecentSpeed or 2.0) and not botPushingForward then return false end
 
     local speedFactor = clamp01(recent / 42.0)
-    local minDistance = (CONFIG.recovery.bumpReverseDistanceMin or 2.4) + speedFactor * 0.9
-    local maxDistance = (CONFIG.recovery.bumpReverseDistanceMax or 6.8) + speedFactor * 0.8
-    local reverseSeconds = (CONFIG.recovery.bumpReverseMinSeconds or 0.65)
-        + speedFactor * ((CONFIG.recovery.bumpReverseMaxSeconds or 1.45) - (CONFIG.recovery.bumpReverseMinSeconds or 0.65))
+    local minDistance = (CONFIG.recovery.bumpReverseDistanceMin or 2.0) + speedFactor * 0.9
+    local maxDistance = (CONFIG.recovery.bumpReverseDistanceMax or 6.0) + speedFactor * 0.8
+    local reverseMin = CONFIG.recovery.bumpReverseMinSeconds or 0.85
+    local reverseSeconds = reverseMin + speedFactor * ((CONFIG.recovery.bumpReverseMaxSeconds or 1.65) - reverseMin)
 
-    local steerLimit = CONFIG.recovery.bumpSteerMax or 72
-    local steer = clamp(lastSteerValue or 0, -steerLimit, steerLimit)
-    if math.abs(steer) < 18 then
-        steer = 0
-    end
-    -- Bump recovery is a simple back-away move. Holding the old route steer here
-    -- made it look like the bot was fighting itself with joystick input.
-    steer = 0
-
+    -- Bump recovery is a simple straight back-away move (steering held at 0).
     S.bumpActive = true
     S.bumpPhase = "reverse"
     S.bumpReason = reason or "stuck"
@@ -2240,9 +2381,8 @@ local function startBumpRecovery(car, route, pidx, reason)
     S.bumpStartY = cy
     S.bumpMinDistance = minDistance
     S.bumpMaxDistance = maxDistance
-    S.bumpSteer = steer
+    S.bumpSteer = 0
     resetForwardNoProgress()
-    setSyntheticReverseKey(false, true)
     gasLevel = 0
     brakeLevel = 0
     lastSteerValue = 0
@@ -2272,36 +2412,29 @@ local function updateBumpRecovery(car, carX, carY)
 
     local backed = getDistanceBetweenCoords2d(carX, carY, S.bumpStartX or carX, S.bumpStartY or carY)
     if S.bumpPhase == "reverse" then
-        setSyntheticReverseKey(true)
         gasLevel = 0
         brakeLevel = 0
         lastSteerValue = S.bumpSteer or 0
         setGameKeyState(0, lastSteerValue)
-        writeDriveControls(0, 0)
-        _G.VR_gas = gasLevel
-        _G.VR_brake = brakeLevel
-        _G.VR_steer = lastSteerValue
-        _G.VR_state = "BUMP_BACK"
-        _G.VR_playing = now
+        writeDriveControls(0, 0, true)
         writeSharedState("BUMP_BACK")
         printStringNow(string.format("~y~BUMP BACK ~w~%.1fm", backed), 100)
 
         local reverseElapsed = now - (S.bumpStartedAt or now)
-        if reverseElapsed >= (CONFIG.recovery.bumpFreezeEscalateSeconds or 0.85)
+        if reverseElapsed >= (CONFIG.recovery.bumpFreezeEscalateSeconds or 1.2)
             and backed <= (CONFIG.recovery.bumpFreezeEscalateDistance or 0.25) then
             logEvent("RECOVERY", string.format("bump could not move %.2fm in %.2fs; escalating to freeze", backed, reverseElapsed))
             startFreezeRecovery("real")
             return true
         end
 
-        local backedEnough = backed >= (S.bumpMinDistance or 2.4)
-        local backedTooFar = backed >= (S.bumpMaxDistance or 6.8)
+        local backedEnough = backed >= (S.bumpMinDistance or 2.0)
+        local backedTooFar = backed >= (S.bumpMaxDistance or 6.0)
         local hardTimeDone = now >= ((S.bumpStartedAt or now) + (CONFIG.recovery.bumpReverseHardMaxSeconds or 2.6))
         local plannedTimeDone = now >= (S.bumpUntil or now)
         if backedTooFar or hardTimeDone or (plannedTimeDone and backedEnough) then
             S.bumpPhase = "coast"
             S.bumpUntil = now + (CONFIG.recovery.bumpCoastSeconds or 0.32)
-            setSyntheticReverseKey(false, true)
             gasLevel = 0
             brakeLevel = 0
             lastSteerValue = 0
@@ -2312,14 +2445,11 @@ local function updateBumpRecovery(car, carX, carY)
     end
 
     if S.bumpPhase == "coast" then
-        setSyntheticReverseKey(false, true)
         gasLevel = 0
         brakeLevel = 0
         lastSteerValue = 0
         setGameKeyState(0, 0)
         writeDriveControls(0, 0)
-        _G.VR_state = "BUMP_WAIT"
-        _G.VR_playing = now
         writeSharedState("BUMP_WAIT")
         printStringNow("~y~BUMP WAIT", 100)
         if now >= (S.bumpUntil or 0.0) then
@@ -2416,67 +2546,54 @@ local function updateForwardNoProgress(route, pidx, cx, cy, absSpeed)
         return false
     end
 
-    local epsilon = CONFIG.recovery.forwardProgressEpsilon or 0.06
+    -- Expected progress per frame shrinks with shorter frames, so both the
+    -- epsilon and the counter are in reference frames.
+    local epsilon = (CONFIG.recovery.forwardProgressEpsilon or 0.06) * frameScale
     local lastDist = S.forwardNoProgressDist or dist
     if dist >= lastDist - epsilon then
-        S.forwardNoProgressFrames = (S.forwardNoProgressFrames or 0) + 1
+        S.forwardNoProgressFrames = (S.forwardNoProgressFrames or 0) + frameScale
     else
-        S.forwardNoProgressFrames = math.max(0, (S.forwardNoProgressFrames or 0) - 3)
+        S.forwardNoProgressFrames = math.max(0, (S.forwardNoProgressFrames or 0) - 3 * frameScale)
     end
     S.forwardNoProgressDist = dist
 
     return (S.forwardNoProgressFrames or 0) >= (CONFIG.recovery.forwardNoProgressFrames or 44)
 end
 
+-- Types a chat command with the keyboard. Returns a job whose done / ok /
+-- finishedAt fields the caller polls, or nil and a reason when typing cannot
+-- start. It never types while another window is active or a SA-MP dialog is
+-- open, and it stops (releasing every key) if either happens mid-way.
 local function typeSAMPCommand(cmd)
     cmd = tostring(cmd or "")
-    if cmd == "" then return false end
+    if cmd == "" then return nil, "empty command" end
+    if commandJob and not commandJob.done then return nil, "already typing" end
+    if not Win32.init() then return nil, "user32 unavailable" end
+    if not Win32.isGameForeground() then return nil, "game window not active" end
+    if isSampDialogActive() then return nil, "dialog open" end
 
-    local ffiok, ffi = pcall(require, "ffi")
-    if not ffiok then
-        logEvent("INPUT", "typeSAMPCommand failed: ffi unavailable")
-        return false
-    end
+    local job = { cmd = cmd, done = false, ok = false, cancelled = false, startedAt = os.clock() }
+    commandJob = job
 
-    if not commandInputFfiReady then
-        pcall(ffi.cdef, "void keybd_event(unsigned char, unsigned char, unsigned long, unsigned long*);")
-        pcall(ffi.cdef, "short VkKeyScanA(char ch);")
-        commandInputFfiReady = true
-    end
-
-    local u32ok, u32 = pcall(ffi.load, "user32")
-    if not u32ok then
-        logEvent("INPUT", "typeSAMPCommand failed: user32 unavailable")
-        return false
+    local function blockedReason()
+        if job.cancelled then return "cancelled" end
+        if not Win32.isGameForeground() then return "game window lost focus" end
+        if isSampDialogActive() then return "dialog opened" end
+        return nil
     end
 
     local function tapKey(vk, holdMs)
-        u32.keybd_event(vk, 0, 0, nil)
+        Win32.press(vk)
         wait(holdMs or 35)
-        u32.keybd_event(vk, 0, 2, nil)
-    end
-
-    local function releaseTypingKeys()
-        local keys = {0x10, 0x11, 0x12, 0x57, 0x41, 0x53, 0x44, 0x20, 0x0D}
-        for _, vk in ipairs(keys) do
-            u32.keybd_event(vk, 0, 2, nil)
-        end
+        Win32.release(vk)
     end
 
     local function tapCharacter(ch)
         local byte = string.byte(ch)
         if not byte then return false end
-
-        local vk, needShift = nil, false
-        if ch == "/" then
-            local ok, scan = pcall(u32.VkKeyScanA, byte)
-            if ok and scan and scan >= 0 then
-                vk = scan % 256
-                needShift = math.floor(scan / 256) % 2 == 1
-            else
-                vk = 0xBF -- VK_OEM_2, slash on common GTA/SA-MP keyboard layouts.
-            end
-        elseif byte >= 97 and byte <= 122 then
+        local vk
+        local needShift = false
+        if byte >= 97 and byte <= 122 then
             vk = byte - 32
         elseif byte >= 65 and byte <= 90 then
             vk = byte
@@ -2484,33 +2601,55 @@ local function typeSAMPCommand(cmd)
         elseif byte >= 48 and byte <= 57 then
             vk = byte
         else
-            local ok, scan = pcall(u32.VkKeyScanA, byte)
-            if not ok or not scan or scan < 0 then return false end
-            vk = scan % 256
-            needShift = math.floor(scan / 256) % 2 == 1
+            local ok, scan = pcall(Win32.u32.VkKeyScanA, byte)
+            scan = ok and tonumber(scan) or -1
+            if scan >= 0 then
+                vk = scan % 256
+                needShift = math.floor(scan / 256) % 2 == 1
+            elseif ch == "/" then
+                vk = 0xBF -- VK_OEM_2, slash on common GTA/SA-MP keyboard layouts.
+            else
+                return false
+            end
         end
-
-        if needShift then u32.keybd_event(0x10, 0, 0, nil) end
+        if needShift then Win32.press(0x10) end
         tapKey(vk, 30)
-        if needShift then u32.keybd_event(0x10, 0, 2, nil) end
+        if needShift then Win32.release(0x10) end
         return true
     end
 
     lua_thread.create(function()
-        releaseTypingKeys()
-        tapKey(0x54, 50) -- T opens SA-MP chat in this setup.
-        wait(350)
+        Win32.releaseKeys({0x10, 0x11, 0x12})
+        local reason = blockedReason()
+        if not reason then
+            tapKey(0x54, 50) -- T opens SA-MP chat in this setup.
+            wait(350)
+        end
         for i = 1, #cmd do
+            reason = reason or blockedReason()
+            if reason then break end
             if not tapCharacter(cmd:sub(i, i)) then
                 logEvent("INPUT", "typeSAMPCommand skipped character at " .. tostring(i))
             end
             wait(45)
         end
-        wait(180)
-        tapKey(0x0D, 40)
-        releaseTypingKeys()
+        if not reason then
+            wait(180)
+            reason = blockedReason()
+        end
+        if not reason then
+            tapKey(0x0D, 40)
+        end
+        Win32.releaseHeld()
+        job.reason = reason
+        job.ok = reason == nil
+        job.finishedAt = os.clock()
+        job.done = true
+        if reason then
+            logEvent("INPUT", "typing '" .. cmd .. "' stopped: " .. reason)
+        end
     end)
-    return true
+    return job
 end
 
 local function handleFreeze(car, route, pidx)
@@ -2522,7 +2661,7 @@ local function handleFreeze(car, route, pidx)
     local externalFreeze = sharedFreezeActive()
 
     if externalFreeze then
-        if not S.freezeTestLatched then
+        if not S.freezeTestLatched and not S.externalFreezeAck then
             logEvent("RECOVERY", "external freeze detected")
             startFreezeRecovery("test")
         end
@@ -2586,7 +2725,7 @@ local function handleFreeze(car, route, pidx)
 
     local stoppedNow = absSpeed < 0.75 and moved < 0.14
     if stoppedNow then
-        suddenStopFrames = suddenStopFrames + 1
+        suddenStopFrames = suddenStopFrames + frameScale
     elseif absSpeed > 2.0 or moved > 0.35 then
         suddenStopFrames = 0
     end
@@ -2619,7 +2758,7 @@ local function handleFreeze(car, route, pidx)
     end
 
     if stoppedNow then
-        freezeTimer = freezeTimer + 1
+        freezeTimer = freezeTimer + frameScale
         local botTryingForward = (gasLevel or 0) > 70
             or (S.recentDriveSpeed or 0.0) > 1.2
             or math.abs(lastDriveSpeed or 0.0) > 1.0
@@ -2654,7 +2793,6 @@ local function handleFreeze(car, route, pidx)
         resetForwardNoProgress()
         S.frozenByAdmin = false
         S.refreshSent = false
-        S.refreshTarget = math.random(200, 520)
         if pauseReleaseReason == "FROZEN" or pauseReleaseReason == "FREEZE_TEST" or pauseReleaseReason == "SUDDEN_STOP" then
             pauseReleaseReason = ""
         end
@@ -2679,8 +2817,7 @@ local function handleAdminRotate(car)
     local diff = math.abs(heading - lastCarHeading)
     if diff > 180 then diff = 360 - diff end
     local rotateMode = consumeRotateFlag()
-    local triggered = diff > 150 or (_G.VR_ADMIN_ROTATED == true) or rotateMode ~= nil
-    if triggered then _G.VR_ADMIN_ROTATED = false end
+    local triggered = diff > 150 or rotateMode ~= nil
     lastCarHeading = heading
     if not triggered then return end
     syncPausedState()
@@ -2694,7 +2831,7 @@ local function handleAdminRotate(car)
     lua_thread.create(function()
         local fightUntil = S.rotateFightUntil
         local untilTime = S.rotateReleaseUntil
-        while os.clock() < untilTime do
+        while playing and os.clock() < untilTime do
             if freezeRecoveryOwnsControls() then
                 releaseControls(pauseReleaseReason ~= "" and pauseReleaseReason or "FREEZE_WAIT")
             elseif os.clock() < fightUntil then
@@ -2730,8 +2867,10 @@ local function finishDialogPause()
 end
 
 local function handleArbotas()
+    -- Other scripts can only signal through files: each MoonLoader script has
+    -- its own Lua state, so their _G values are never visible here.
     local fakeDialogMode = sharedDialogMode()
-    if fakeDialogMode == "fake_arbotas" or _G.VR_TEST_ARBOTAS then
+    if fakeDialogMode == "fake_arbotas" then
         if S.bumpActive then
             stopBumpRecovery("BUMP_DIALOG")
         end
@@ -2742,16 +2881,7 @@ local function handleArbotas()
         releaseControls("AR_BOTAS_TEST")
         return
     end
-    if _G.VR_DIALOG_ACTIVE then
-        if S.bumpActive then
-            stopBumpRecovery("BUMP_DIALOG")
-        end
-        S.dialogPaused = true
-        S.dialogReleaseUntil = 0.0
-        syncPausedState()
-        releaseControls("DIALOG")
-        return
-    elseif S.testArbotasPaused then
+    if S.testArbotasPaused then
         finishDialogPause()
         return
     end
@@ -2771,10 +2901,6 @@ local function handleArbotas()
     releaseControls("DIALOG")
     return
 end
-
-Utils.clamp01 = clamp01
-Utils.clamp = clamp
-Utils.findNearestWaypoint = findNearestWaypoint
 
 RouteStorage.save = saveRoute
 RouteStorage.load = loadRoute
@@ -2846,42 +2972,43 @@ function RouteRecorder.startRecording()
         showMsg("~r~Turi buti masinos viduje!")
         return false
     end
-    if S.bumpActive then
-        stopBumpRecovery("BUMP_REC")
-    end
+    RouteFollower.clearTransientState()
     releaseControls("REC_START")
-    setSyntheticReverseKey(false, true)
     recording = true
     playing = false
     current_route = {}
     recordReverseFrames = 0
     recordForwardBrakeFrames = 0
     recordDriveMode = DRIVE_FORWARD
-    start_x, start_y, start_z = getCharCoordinates(PLAYER_PED)
+    recordLeftStart = false
+    start_x, start_y = getCharCoordinates(PLAYER_PED)
     lastRecordHeading = getCarHeading(storeCarCharIsInNoSave(PLAYER_PED))
     tick = os.clock() * 1000
-    refreshStateView()
     dbg("route", "recording started")
     showMsg("~g~Irasymas pradetas! Grizk i starta uzdaryt kilpa!")
     return true
 end
 
-function RouteRecorder.stopRecording()
+-- prefix: optional text shown before the "saved" message.
+function RouteRecorder.stopRecording(prefix)
     recording = false
     current_route = normalizeRouteReverseFlags(current_route)
-    if #current_route > 0 and RouteStorage.save(current_name, current_route) then
+    if #current_route < 2 then
+        showMsg((prefix or "") .. "~r~Per mazai tasku - kelias neissaugotas!")
+    elseif RouteStorage.save(current_name, current_route) then
         RouteStorage.logRouteSummary(current_name, current_route, "saved")
-        showMsg("~g~Kelias issaugotas! Tasku: " .. #current_route)
+        showMsg((prefix or "") .. "~g~Kelias issaugotas! Tasku: " .. #current_route)
+    else
+        logEvent("ROUTE", "saving " .. tostring(current_name) .. " failed")
+        showMsg((prefix or "") .. "~r~Nepavyko issaugoti kelio!")
     end
-    refreshStateView()
 end
 
 function RouteRecorder.recordTick()
     if not recording then return end
     if not isCharInAnyCar(PLAYER_PED) then
-        recording = false
-        refreshStateView()
-        showMsg("~r~Irasymas sustabdytas - islejai masina!")
+        -- Keep what was recorded instead of silently dropping it.
+        RouteRecorder.stopRecording("~r~Irasymas sustabdytas - islejai masina!~n~")
         return
     end
 
@@ -2893,7 +3020,7 @@ function RouteRecorder.recordTick()
     if hDiff > 180 then hDiff = 360 - hDiff end
     if hDiff > 15 or (time - tick > recordingDelay) then
         local speed = getCarSpeed(car)
-        local reverseIntent = isReverseRecordingInputActive(car)
+        local reverseIntent = isReverseRecordingInputActive()
         local prev = current_route[#current_route]
         local absSpeed = math.abs(speed or 0.0)
         local prevSpeed = prev and math.abs(prev.speed or 0.0) or 0.0
@@ -2962,9 +3089,15 @@ function RouteRecorder.recordTick()
         elseif reverseIntent then
             modeText = recordHudState == "BRAKE" and " ~y~BRAKE" or (recordHudState == "WAIT" and " ~y~WAIT" or " ~y~S")
         end
-        printStringNow('~g~Irasymas ~w~X:'..math.floor(posX)..' Y:'..math.floor(posY)..' G:'..math.floor(speed)..modeText, 1000)
+        printStringNow('~g~Irasymas ~w~X:'..math.floor(posX)..' Y:'..math.floor(posY)..' G:'..math.floor(speed * 3.6)..modeText, 1000)
         local dist = getDistanceBetweenCoords2d(posX, posY, start_x, start_y)
-        if dist < 5.0 and #current_route > 50 then
+        if dist > 20.0 then
+            recordLeftStart = true
+        end
+        -- Close the loop only after the car has left the start area; points are
+        -- recorded while standing still, so waiting ~4 s at the start used to
+        -- end the recording immediately.
+        if recordLeftStart and dist < 5.0 and #current_route > 50 then
             recording = false
             current_route = normalizeRouteReverseFlags(current_route)
             if RouteStorage.save(current_name, current_route) then
@@ -2973,7 +3106,6 @@ function RouteRecorder.recordTick()
             end
         end
     end
-    refreshStateView()
 end
 
 ObstacleAvoidance.scanObstacles = scanRouteAhead
@@ -2984,12 +3116,88 @@ RecoverySystem.handleFreeze = handleFreeze
 RecoverySystem.resetFreezeRecovery = resetFreezeRecovery
 RecoverySystem.updateBumpRecovery = updateBumpRecovery
 
+local function freezeResumeDelay()
+    local delay = tonumber(S.freezeResumeDelay) or 0.0
+    if delay <= 0.0 then
+        delay = CONFIG.recovery.freezeResumeDelayMinSeconds or 0.5
+    end
+    return delay
+end
+
+-- State name while the car is held still because of a freeze.
+local function frozenHoldReason()
+    if S.externalFreezeAck and not S.freezeTestLatched then return "FREEZE_HOLD" end
+    return pauseReleaseReason ~= "" and pauseReleaseReason or "FREEZE_WAIT"
+end
+
+local function updateRefreshStep(now)
+    local retry = CONFIG.recovery.refreshRetrySeconds or 0.75
+    if not S.refreshSent then
+        releaseControls("FREEZE_WAIT")
+        if now < (S.freezeRefreshAt or 0.0) then return end
+        if S.freezeRecoveryMode == "test" and not CONFIG.recovery.typeRefreshInFreezeTest then
+            logEvent("RECOVERY", "freeze test: /refresh not sent (typeRefreshInFreezeTest = false)")
+            S.refreshSent = true
+            S.refreshJob = nil
+            S.freezeRefreshSentAt = now
+            S.freezeReleaseUntil = now + freezeResumeDelay()
+            return
+        end
+        local job, reason = typeSAMPCommand("/refresh")
+        if job then
+            logEvent("RECOVERY", "freeze recovery sending /refresh")
+            S.refreshSent = true
+            S.refreshJob = job
+            S.refreshBlockedReason = nil
+            S.freezeRefreshSentAt = now
+            S.freezeReleaseUntil = math.huge -- set once typing has finished
+        else
+            S.freezeRefreshAt = now + retry
+            if reason ~= S.refreshBlockedReason then
+                S.refreshBlockedReason = reason
+                logEvent("RECOVERY", "freeze recovery waiting to send /refresh: " .. tostring(reason))
+            end
+        end
+        return
+    end
+
+    local job = S.refreshJob
+    if job and not job.done then
+        releaseControls("FREEZE_REFRESH")
+        return
+    end
+    if job and not job.ok then
+        logEvent("RECOVERY", "freeze recovery /refresh interrupted (" .. tostring(job.reason) .. "); retry scheduled")
+        S.refreshJob = nil
+        S.refreshSent = false
+        S.freezeRefreshAt = now + retry
+        releaseControls("FREEZE_WAIT")
+        return
+    end
+    if job then
+        -- Resume only after the command has actually been typed and sent.
+        local finishedAt = job.finishedAt or now
+        logEvent("RECOVERY", string.format("freeze recovery /refresh typed in %.2fs", finishedAt - (job.startedAt or finishedAt)))
+        S.freezeReleaseUntil = finishedAt + freezeResumeDelay()
+        S.refreshJob = nil
+    end
+    if now < (S.freezeReleaseUntil or 0.0) then
+        releaseControls("FREEZE_REFRESH")
+    else
+        releaseControls("FREEZE_RESUME")
+        resetFreezeRecovery()
+    end
+end
+
 function RecoverySystem.updateControlThread()
     local now = os.clock()
     syncPausedState(now)
     local freezeActive = sharedFreezeActive()
+    if not freezeActive then
+        S.externalFreezeAck = false
+    end
 
-    if freezeActive and playing and not S.freezeTestLatched then
+    if freezeActive and playing and not S.freezeTestLatched and not S.externalFreezeAck then
         logEvent("RECOVERY", "external freeze detected by control thread")
         startFreezeRecovery("test")
         now = os.clock()
@@ -2999,42 +3207,23 @@ function RecoverySystem.updateControlThread()
         and not freezeActive
         and not S.freezeTestLatched
         and not S.frozenByAdmin then
-        refreshStateView()
         return
     end
 
     if S.freezeTestLatched then
-        if not S.refreshSent then
-            releaseControls("FREEZE_WAIT")
-            if now >= (S.freezeRefreshAt or 0.0) then
-                local resumeDelay = tonumber(S.freezeResumeDelay) or 0.0
-                if resumeDelay <= 0.0 then
-                    resumeDelay = CONFIG.recovery.freezeResumeDelayMinSeconds or 0.5
-                end
-                logEvent("RECOVERY", "freeze recovery sending /refresh")
-                if typeSAMPCommand("/refresh") then
-                    S.refreshSent = true
-                    S.freezeRefreshSentAt = now
-                    S.freezeReleaseUntil = now + resumeDelay
-                else
-                    S.freezeRefreshAt = now + 0.75
-                    logEvent("RECOVERY", "freeze recovery /refresh typing failed; retry scheduled")
-                end
-            end
-        elseif now < (S.freezeReleaseUntil or 0.0) then
-            releaseControls("FREEZE_REFRESH")
-        else
-            releaseControls("FREEZE_RESUME")
-            resetFreezeRecovery()
-        end
+        updateRefreshStep(now)
     elseif now < S.rotateFightUntil then
         pressRotateReaction()
     elseif now < S.rotateReleaseUntil then
         releaseControls("ROTATE_CONFUSED")
-    elseif paused or freezeActive then
-        releaseControls(pauseReleaseReason ~= "" and pauseReleaseReason or "SAFE")
+    elseif playing and (paused or freezeActive) then
+        -- Only an active route holds the controls; a stopped bot never does.
+        if freezeActive and not paused then
+            releaseControls(frozenHoldReason())
+        else
+            releaseControls(pauseReleaseReason ~= "" and pauseReleaseReason or "SAFE")
+        end
     end
-    refreshStateView()
 end
 
 AdminProtection.handleAdminCheck = handleAdminRotate
@@ -3042,11 +3231,9 @@ DialogBridge.update = handleArbotas
 DialogBridge.writeBotState = writeSharedState
 
 function RouteFollower.resetPlaybackStartState()
-    setSyntheticReverseKey(false, true)
     writeDriveControls(0, 0)
     playbackDriveMode = DRIVE_FORWARD
     S.lapWander = (math.random() * 3.0) - 1.5
-    S.lapCount = 0
     gasLevel = 0; brakeLevel = 0
     S.gasLiftFrames = 0
     S.nextGasLift = os.clock() + math.random(20, 60)
@@ -3060,8 +3247,11 @@ function RouteFollower.resetPlaybackStartState()
     S.frozenByAdmin = false
     S.freezeTestLatched = false
     S.freezeRecoveryMode = ""
+    S.refreshSent = false
+    S.refreshJob = nil
+    S.externalFreezeAck = false
+    S.forwardSpeed = nil
     S.freezeRefreshSentAt = 0.0
-    S.freezeFightUntil = 0.0
     S.freezeReleaseUntil = 0.0
     S.freezeRefreshAt = 0.0
     S.freezeResumeDelay = 0.0
@@ -3075,8 +3265,6 @@ function RouteFollower.resetPlaybackStartState()
     S.routeObstacleTimer = 0
     S.obstacleHits = {}
     S.obstacleProbes = {}
-    S.rejoinFrames = 0
-    S.rejoinSteer = 0
     S.rejoinCooldownUntil = 0.0
     S.rejoinDisableUntil = os.clock() + 4.0
     resetObstacleBypass()
@@ -3099,7 +3287,41 @@ function RouteFollower.resetPlaybackStartState()
     if isCharInAnyCar(PLAYER_PED) then
         lastCarHeading = getCarHeading(storeCarCharIsInNoSave(PLAYER_PED))
     end
-    refreshStateView()
+end
+
+-- Clears every pause and recovery source. Used whenever playback ends so a
+-- stopped bot cannot keep holding the controls (e.g. stopping while paused or
+-- while a dialog was open used to leave the car without throttle until F7).
+function RouteFollower.clearTransientState()
+    if S.bumpActive then
+        stopBumpRecovery(nil)
+    end
+    resetBumpState(true)
+    if commandJob and not commandJob.done then
+        commandJob.cancelled = true
+    end
+    S.refreshJob = nil
+    S.refreshSent = false
+    S.manualPaused = false
+    S.dialogPaused = false
+    S.testArbotasPaused = false
+    S.dialogReleaseUntil = 0.0
+    S.freezeTestLatched = false
+    S.freezeRecoveryMode = ""
+    S.frozenByAdmin = false
+    S.freezeRefreshSentAt = 0.0
+    S.freezeReleaseUntil = 0.0
+    S.freezeRefreshAt = 0.0
+    S.freezeResumeDelay = 0.0
+    S.freezeRecoveryGraceUntil = 0.0
+    S.reversePlaybackGraceUntil = 0.0
+    S.backToForwardUntil = 0.0
+    S.rotateFightUntil = 0.0
+    S.rotateReleaseUntil = 0.0
+    overrideActive = false
+    freezeTimer = 0
+    suddenStopFrames = 0
+    syncPausedState()
 end
 
 function RouteFollower.startPlayback()
@@ -3112,7 +3334,6 @@ function RouteFollower.startPlayback()
     if #current_route > 5 then
         RouteStorage.logRouteSummary(current_name, current_route, "play_memory")
         play_index = 1; playbackDriveMode = routeDriveModeAt(current_route, 1); playing = true; syncPausedState()
-        refreshStateView()
         showMsg("~g~Vaziavimas pradetas!")
         return true
     end
@@ -3121,31 +3342,26 @@ function RouteFollower.startPlayback()
     if RouteStorage.validateRoute(route) then
         RouteStorage.logRouteSummary(current_name, route, "play_file")
         current_route = route; play_index = 1; playbackDriveMode = routeDriveModeAt(current_route, 1); playing = true; syncPausedState()
-        refreshStateView()
         showMsg("~g~Kelias ikrautas ir paleistas: " .. current_name)
         return true
     end
 
-    refreshStateView()
     showMsg("~r~Nera irasyto kelio!")
     return false
 end
 
 function RouteFollower.stopPlayback()
-    if S.bumpActive then
-        stopBumpRecovery("BUMP_STOP")
-    end
-    resetForwardNoProgress()
+    RouteFollower.clearTransientState()
     playing = false
     releaseControls("STOPPED")
-    refreshStateView()
     showMsg("~r~Vaziavimas sustabdytas!")
 end
 
 function RouteFollower.stopAll()
-    if S.bumpActive then
-        stopBumpRecovery("BUMP_ALL_STOP")
+    if recording then
+        RouteRecorder.stopRecording()
     end
+    RouteFollower.clearTransientState()
     recording = false; playing = false; repeating = false
     playbackDriveMode = DRIVE_FORWARD
     recordDriveMode = DRIVE_FORWARD
@@ -3156,7 +3372,6 @@ function RouteFollower.stopAll()
     S.dialogReleaseUntil = 0.0
     S.freezeRecoveryMode = ""
     S.freezeRefreshSentAt = 0.0
-    S.freezeFightUntil = 0.0
     S.freezeReleaseUntil = 0.0
     S.freezeRefreshAt = 0.0
     S.freezeResumeDelay = 0.0
@@ -3173,8 +3388,6 @@ function RouteFollower.stopAll()
     S.routeObstacleTimer = 0
     S.obstacleHits = {}
     S.obstacleProbes = {}
-    S.rejoinFrames = 0
-    S.rejoinSteer = 0
     S.rejoinCooldownUntil = 0.0
     S.rejoinDisableUntil = 0.0
     resetObstacleBypass()
@@ -3196,7 +3409,6 @@ function RouteFollower.stopAll()
     clearRotateTrigger()
     syncPausedState()
     releaseControls("ALL_STOP")
-    refreshStateView()
     showMsg("~r~Viskas sustabdyta!")
 end
 
@@ -3222,7 +3434,7 @@ function ObstacleAvoidance.updateScan(car)
         return
     end
 
-    S.routeObstacleTimer = S.routeObstacleTimer + 1
+    S.routeObstacleTimer = S.routeObstacleTimer + frameScale
     if S.routeObstacleTimer >= CONFIG.obstacle.scanEveryFrames then
         S.routeObstacleTimer = 0
         local scannedDist, scannedDir, scannedUrgency = scanRouteAhead(current_route, play_index, car)
@@ -3234,33 +3446,44 @@ function ObstacleAvoidance.updateScan(car)
     end
 end
 
+-- frameScale = real frame time in reference frames (1.0 at referenceFps).
+-- A long gap (pause, override, lag spike) is clamped so it cannot count as
+-- many frames at once.
+local function updateFrameScale()
+    local now = os.clock()
+    if not playing or lastPlaybackTickAt == nil then
+        frameScale = 1.0
+    else
+        frameScale = clamp((now - lastPlaybackTickAt) * (CONFIG.timing.referenceFps or 30),
+            CONFIG.timing.minFrameScale or 0.25, CONFIG.timing.maxFrameScale or 2.0)
+    end
+    lastPlaybackTickAt = playing and now or nil
+end
+
 function RouteFollower.updatePlayback()
-    if playing and #current_route > 0 and sharedFreezeActive() and not S.freezeTestLatched then
+    updateFrameScale()
+    if playing and #current_route > 0 and sharedFreezeActive() and not S.freezeTestLatched and not S.externalFreezeAck then
         logEvent("RECOVERY", "external freeze detected by playback gate")
         startFreezeRecovery("test")
     end
     if playing and freezeRecoveryOwnsControls() then
-        releaseControls(pauseReleaseReason ~= "" and pauseReleaseReason or "FREEZE_WAIT")
-        refreshStateView()
+        releaseControls(frozenHoldReason())
         return
     end
 
     if not (playing and not paused and #current_route > 0) then return end
 
     if not isCharInAnyCar(PLAYER_PED) then
+        RouteFollower.clearTransientState()
         playing = false; repeating = false
-        syncPausedState()
-        if S.bumpActive then
-            stopBumpRecovery("BUMP_NO_CAR")
-        end
         releaseControls("NO_CAR")
-        refreshStateView()
         showMsg("~r~Vaziavimas sustabdytas - islejei masina!")
         return
     end
 
     local car = storeCarCharIsInNoSave(PLAYER_PED)
     local carX, carY, carZ = getCarCoordinates(car)
+    S.forwardSpeed = getCarForwardSpeed(car)
 
     if isPlayerControlling() then
         if not overrideActive then
@@ -3271,7 +3494,6 @@ function RouteFollower.updatePlayback()
             releaseControls("OVERRIDE")
         end
         printStringNow("~y~OVERRIDE ACTIVE", 100)
-        refreshStateView()
         return
     end
 
@@ -3281,13 +3503,11 @@ function RouteFollower.updatePlayback()
     -- freeze/obstacle/route logic can write controls during bump or R >> FWD.
     if S.bumpActive then
         if RecoverySystem.updateBumpRecovery(car, carX, carY) then
-            refreshStateView()
             return
         end
     end
 
     if handleBackToForwardTransition() then
-        refreshStateView()
         return
     end
 
@@ -3298,7 +3518,6 @@ function RouteFollower.updatePlayback()
 
     if S.bumpActive then
         if RecoverySystem.updateBumpRecovery(car, carX, carY) then
-            refreshStateView()
             return
         end
     end
@@ -3307,14 +3526,11 @@ function RouteFollower.updatePlayback()
         -- Freeze recovery thread owns inputs so real and test freezes behave identically.
     elseif S.frozenByAdmin or sharedFreezeActive() then
         releaseControls(pauseReleaseReason ~= "" and pauseReleaseReason or "FROZEN")
-    elseif _G.VR_TEST_ARBOTAS then
-        releaseControls("AR_BOTAS_TEST")
     elseif not paused then
         local point = current_route[play_index]
-        local speedMult = 1.0
         local driveMode = getPlaybackDriveMode(current_route, play_index)
         local reverseMode = driveMode == DRIVE_BACK
-        local tX, tY, tZ
+        local tX, tY
 
         if reverseMode then
             local syncedIndex = syncReversePlaybackIndex(current_route, play_index, carX, carY)
@@ -3339,7 +3555,6 @@ function RouteFollower.updatePlayback()
                 steerBuf = {0, 0}
                 if oldMode == DRIVE_BACK and driveMode == DRIVE_FORWARD then
                     startBackToForwardTransition()
-                    refreshStateView()
                     return
                 end
             end
@@ -3348,14 +3563,14 @@ function RouteFollower.updatePlayback()
         if reverseMode then
             -- Backing up needs the exact recorded waypoint. Forward driving can
             -- keep the smoothed spline/lateral route behavior.
-            tX, tY, tZ = point.x, point.y, point.z
+            tX, tY = point.x, point.y
             if S.bypassActive or math.abs(S.currentLateral or 0.0) > 0.05 then
                 resetObstacleBypass()
                 S.currentLateral = 0.0
             end
             collisionCooldown = 0
         else
-            tX, tY, tZ = getSplineTarget(current_route, play_index)
+            tX, tY = getSplineTarget(current_route, play_index)
         end
 
         if not reverseMode and play_index < #current_route then
@@ -3400,7 +3615,7 @@ function RouteFollower.updatePlayback()
                 local lateralLerp = obstacleAvoidActive
                     and (S.bypassReturning and 0.030 or (S.routeObstacleDist > 28.0 and 0.050 or 0.070))
                     or (S.routeObstacleUrgency > 0.65 and 0.11 or (S.routeObstacleUrgency > 0.35 and 0.08 or 0.045))
-                S.currentLateral = S.currentLateral + (targetLateral - S.currentLateral) * lateralLerp
+                S.currentLateral = S.currentLateral + (targetLateral - S.currentLateral) * scaledLerp(lateralLerp)
                 tX = tX + (-ndy / nd) * S.currentLateral
                 tY = tY + (ndx / nd) * S.currentLateral
             end
@@ -3410,20 +3625,22 @@ function RouteFollower.updatePlayback()
 
         local rawCurrentSpeed = getCarSpeed(car)
         local currentSpeed = reverseMode and math.abs(rawCurrentSpeed) or rawCurrentSpeed
-        local targetSpeed = (reverseMode and math.abs(point.speed or 0) or point.speed) * speedMult
+        local targetSpeed = reverseMode and math.abs(point.speed or 0) or (point.speed or 0)
         local steerTargetX, steerTargetY = tX, tY
-        setSyntheticReverseKey(reverseMode)
+        local reverseDrive = false
         if S.bypassActive then
             targetSpeed = math.min(targetSpeed, 46.0)
         end
 
-        local rejoiningRoute = reverseMode and false or handleRouteRejoinRecovery(car, carX, carY, tX, tY, currentSpeed)
-        if not rejoiningRoute then
-            local obsX, obsY, obsZ, obsDir, obsDist, obsSide, obsUrgency = nil, nil, nil, nil, nil, nil, nil
+        if not reverseMode then
+            handleRouteRejoinRecovery(car, carX, carY, tX, tY, currentSpeed)
+        end
+        do
+            local obsX, obsY, obsDir, obsDist, obsSide, obsUrgency = nil, nil, nil, nil, nil, nil
             if not reverseMode then
-                obsX, obsY, obsZ, obsDir, obsDist, obsSide, obsUrgency = getObstacleAhead(car, tX, tY)
+                obsX, obsY, obsDir, obsDist, obsSide, obsUrgency = getObstacleAhead(car, tX, tY)
             end
-            if obsX and collisionCooldown == 0 and not reverseMode then
+            if obsX and collisionCooldown <= 0 and not reverseMode then
                 S.avoidSideHit = obsSide == true
                 avoidSteerDir = avoidDir(car, obsX, obsY, tX, tY)
                 S.avoidRouteDir = (obsDir and obsDir ~= 0)
@@ -3447,7 +3664,7 @@ function RouteFollower.updatePlayback()
             end
 
             if collisionCooldown > 0 then
-                collisionCooldown = collisionCooldown - 1
+                collisionCooldown = math.max(0, collisionCooldown - frameScale)
                 if S.avoidRouteDir ~= 0 then
                     S.routeAvoidDir = S.avoidRouteDir
                 end
@@ -3485,7 +3702,7 @@ function RouteFollower.updatePlayback()
                 end
                 local excess = math.max(0, currentSpeed - targetSpeed * 0.7)
                 brakeLevel = math.min(255, math.floor(excess * 30))
-                gasLevel = math.max(0, gasLevel - 25)
+                gasLevel = math.max(0, gasLevel - 25 * frameScale)
                 writeDriveControls(gasLevel, brakeLevel)
             else
                 if reverseMode then
@@ -3498,10 +3715,12 @@ function RouteFollower.updatePlayback()
                 end
                 if reverseMode then
                     gasLevel = 0
-                    -- Synthetic S already owns reverse. Do not also write the
-                    -- brake byte here; combined inputs feel like handbrake/space
-                    -- and prevent a smooth controlled backing path.
                     brakeLevel = 0
+                    -- Reverse = brake button held with no gas (it brakes first
+                    -- while still rolling forward). Ease off only when already
+                    -- backing faster than the recorded reverse speed.
+                    local reverseLimit = math.max(3.0, targetSpeed) + 1.0
+                    reverseDrive = S.forwardSpeed == nil or S.forwardSpeed > -reverseLimit
                     applyReverseAssist(car, carX, carY, tX, tY, currentSpeed, targetSpeed)
                 else
                     if S.gasLiftFrames > 0 then
@@ -3513,28 +3732,26 @@ function RouteFollower.updatePlayback()
                         S.nextGasLift = os.clock() + math.random(20, 60)
                     else
                         if currentSpeed < targetSpeed then
-                            gasLevel = math.min(255, gasLevel + 18)
-                            brakeLevel = math.max(0, brakeLevel - 50)
+                            gasLevel = math.min(255, gasLevel + 18 * frameScale)
+                            brakeLevel = math.max(0, brakeLevel - 50 * frameScale)
                         elseif currentSpeed < targetSpeed + 1.5 then
-                            brakeLevel = math.max(0, brakeLevel - 50)
+                            brakeLevel = math.max(0, brakeLevel - 50 * frameScale)
                         else
                             local excess = currentSpeed - (targetSpeed + 1.5)
                             local brakeCap = S.bypassActive and 95 or 255
                             local brakeGain = S.bypassActive and 12 or 30
                             brakeLevel = math.min(brakeCap, math.floor(excess * brakeGain))
-                            gasLevel = math.max(0, gasLevel - 25)
+                            gasLevel = math.max(0, gasLevel - 25 * frameScale)
                         end
                     end
                 end
-                writeDriveControls(gasLevel, brakeLevel)
+                writeDriveControls(gasLevel, brakeLevel, reverseDrive)
             end
         end
 
-        printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed) .. 'km/h' .. (reverseMode and ' ~b~BACK' or ''), 100)
-        if not rejoiningRoute then
-            _G.VR_state   = "PLAYING"
-            writeSharedState("PLAYING")
-        end
+        -- getCarSpeed is in m/s.
+        printStringNow('~g~VR Bot ~w~' .. play_index .. '/' .. #current_route .. ' ~y~' .. math.floor(currentSpeed * 3.6) .. 'km/h' .. (reverseMode and ' ~b~BACK' or ''), 100)
+        writeSharedState("PLAYING")
 
         if reverseMode then
             local advancedIndex = advanceReversePlaybackIndex(current_route, play_index, carX, carY, true)
@@ -3552,10 +3769,13 @@ function RouteFollower.updatePlayback()
         else
             local carDist = getDistanceBetweenCoords2d(carX, carY, point.x, point.y)
             if carDist > 30.0 then
-                play_index = findNearestWaypoint(current_route, carX, carY)
+                play_index = findNearestWaypointNear(current_route, carX, carY, play_index, 40, 300, 30.0)
             else
                 local closestIdx, closestDist = play_index, carDist
                 for i = play_index, math.min(play_index + 10, #current_route) do
+                    -- Never jump into a BACK section early: a reverse leg that
+                    -- retraces the forward path is closer than its start point.
+                    if routeDriveModeAt(current_route, i) ~= DRIVE_FORWARD then break end
                     local d = getDistanceBetweenCoords2d(carX, carY, current_route[i].x, current_route[i].y)
                     if d < closestDist then closestDist = d; closestIdx = i end
                 end
@@ -3575,7 +3795,6 @@ function RouteFollower.updatePlayback()
                 S.reversePlaybackGraceUntil = 0.0
                 S.backToForwardUntil = 0.0
                 resetBumpState(true)
-                S.rejoinFrames = 0; S.rejoinSteer = 0
                 S.rejoinCooldownUntil = 0.0
                 S.rejoinDisableUntil = os.clock() + 2.5
                 resetObstacleBypass()
@@ -3583,21 +3802,15 @@ function RouteFollower.updatePlayback()
                 local delayFrames = math.random(1, 2)
                 steerBuf = {}
                 for i = 1, delayFrames do steerBuf[i] = 0 end
-                S.lapCount = S.lapCount + 1
                 showMsg("~g~Kilpa baigta! Kartojama!")
             else
+                RouteFollower.clearTransientState()
                 playing = false; play_index = 1
                 releaseControls("DONE")
                 showMsg("~g~Kelias baigtas!")
             end
         end
     end
-
-    _G.VR_gas     = gasLevel
-    _G.VR_brake   = brakeLevel
-    _G.VR_steer   = lastSteerValue
-    _G.VR_playing = os.clock()
-    refreshStateView()
 end
 
 function InputHandler.handleHotkeys()
@@ -3622,7 +3835,6 @@ function InputHandler.handleHotkeys()
 
     if isKeyJustPressed(VK_F11) then
         repeating = not repeating
-        refreshStateView()
         showMsg(repeating and "~g~Kartojimas IJUNGTAS!" or "~r~Kartojimas ISJUNGTAS!")
     end
 
@@ -3639,7 +3851,6 @@ function InputHandler.handleHotkeys()
             else
                 showMsg("~g~Tesiama!")
             end
-            refreshStateView()
         end
     end
 
@@ -3678,7 +3889,6 @@ function InputHandler.handleHotkeys()
             showMsg("~g~Kliuciu taskai IJUNGTI!")
         end
     end
-    refreshStateView()
 end
 
 function MainLoop.drawTrailDebug()
@@ -3742,54 +3952,46 @@ function MainLoop.drawTrailDebug()
     drawTrailArrows(currentTrail, 0xCC00FFFF)
 end
 
-local function fileHasDangisScriptName(path)
-    local file = io.open(path, "r")
-    if not file then return false end
-    local text = file:read(4096) or ""
-    file:close()
-    return text:find("script_name%s*%(%s*'dangis_vr'%s*%)") ~= nil
-        or text:find('script_name%s*%(%s*"dangis_vr"%s*%)') ~= nil
-end
-
+-- Running scripts named dangis_vr (an old copy under another file name would
+-- make two bots fight over the controls).
 local function findActiveDangisScripts()
+    local ok, list = pcall(function() return script.list() end)
+    if not ok or type(list) ~= "table" then return nil end
     local found = {}
-    local dir = tostring(getWorkingDirectory() or ".")
-    local cmdDir = dir:gsub("/", "\\"):gsub('"', "")
-    local command = 'dir /b /a-d "' .. cmdDir .. '\\*.lua" 2>nul'
-    local ok, pipe = pcall(io.popen, command, "r")
-    if not ok or not pipe then
-        logEvent("STARTUP", "duplicate scan unavailable")
-        return found
-    end
-
-    for name in pipe:lines() do
-        if type(name) == "string" and name:lower():sub(-4) == ".lua" then
-            local fullPath = dir .. "/" .. name
-            if fileHasDangisScriptName(fullPath) then
-                table.insert(found, name)
-            end
+    for _, s in ipairs(list) do
+        local okName, name = pcall(function() return s.name end)
+        if okName and name == "dangis_vr" then
+            local okPath, path = pcall(function() return s.path end)
+            table.insert(found, tostring(okPath and path or name))
         end
     end
-    pipe:close()
     return found
 end
 
-local function warnDuplicateDangisScripts()
+-- Returns the warning text when more than one copy is running.
+local function checkDuplicateDangisScripts()
     local scripts = findActiveDangisScripts()
-    if #scripts <= 1 then
-        logEvent("STARTUP", "duplicate scan ok: " .. tostring(#scripts) .. " active dangis script")
-        return false
+    if not scripts then
+        logEvent("STARTUP", "duplicate scan unavailable")
+        return nil
     end
+    if #scripts <= 1 then
+        logEvent("STARTUP", "duplicate scan ok: " .. tostring(#scripts) .. " running dangis_vr script")
+        return nil
+    end
+    logEvent("STARTUP", "duplicate dangis_vr scripts running: " .. table.concat(scripts, ", "))
+    return "~r~DANGIS WARNING: duplicate scripts active!~n~~y~Disable old dangis_vr copies in moonloader."
+end
 
-    local names = table.concat(scripts, ", ")
-    logEvent("STARTUP", "duplicate dangis scripts detected: " .. names)
-    printStringNow("~r~DANGIS WARNING: duplicate scripts active!", 6000)
-    printStringNow("~y~Disable old dangis_vr copies in moonloader.", 6000)
-    return true
+local function logApiAvailability()
+    local function has(value) return value and "yes" or "MISSING" end
+    logEvent("STARTUP", string.format(
+        "api: objectModel=%s closestObject=%s closestCar=%s allObjects=%s carPointer=%s user32=%s",
+        API.objectModelName or "MISSING", has(API.closestObject), has(API.closestCar),
+        has(API.allObjects), has(API.carPointer), has(Win32.init())))
 end
 
 local function performSafeStartupReset()
-    setSyntheticReverseKey(false, true)
     S.manualPaused = false
     S.dialogPaused = false
     S.testArbotasPaused = false
@@ -3808,29 +4010,27 @@ local function performSafeStartupReset()
     brakeLevel = 0
     lastSteerValue = 0
     pauseReleaseReason = ""
-    setGameKeyState(0, 0)
-    writeDriveControls(0, 0)
-    _G.VR_gas = 0
-    _G.VR_brake = 0
-    _G.VR_steer = 0
-    _G.VR_state = "IDLE"
-    _G.VR_playing = os.clock()
     writeSharedState("IDLE")
     logEvent("STARTUP", "safe startup reset complete")
 end
 
 function MainLoop.initialize()
+    -- Release keys an older version (synthetic S) or an interrupted command
+    -- may have left pressed; done before the startup wait.
+    Win32.releaseKeys({0x53, 0x10, 0x11, 0x12})
     trimDebugLogFile()
-    logEvent("STARTUP", "Dangis VR v5.48 loading")
+    logEvent("STARTUP", string.format("==== %s Dangis VR v%s loading ====", os.date("%Y-%m-%d %H:%M:%S"), VR_VERSION))
     printStringNow("~y~Dangis VR: ~w~Laukiama...", 5000)
     wait(8000)
     RouteStorage.ensurePathsDir()
-    warnDuplicateDangisScripts()
+    local duplicateWarning = checkDuplicateDangisScripts()
     samp = getModuleHandle("samp.dll")
+    logApiAvailability()
     performSafeStartupReset()
-    refreshStateView()
-    printStringNow("~g~Dangis VR v5.48 ikelta!", 3000)
-    printStringNow("~w~F2-Irasyti F10-Paleisti F11-Kartoti F6-Pauze F7-Sustabdyti", 5000)
+    -- printStringNow replaces the previous text, so show one combined message.
+    printStringNow(duplicateWarning
+        or ("~g~Dangis VR v" .. VR_VERSION .. " ikelta!~n~~w~F2-Irasyti F10-Paleisti F11-Kartoti F6-Pauze F7-Sustabdyti"),
+        duplicateWarning and 8000 or 5000)
 end
 
 function MainLoop.startThreads()
@@ -3863,6 +4063,22 @@ function MainLoop.startThreads()
     end)
 end
 
+-- Runs on unload, reload (Ctrl+R / AutoReboot) and crashes: release every key
+-- the typing thread may be holding and leave the HUD a truthful state.
+function onScriptTerminate(scr, quitGame)
+    if scr ~= thisScript() then return end
+    if commandJob and not commandJob.done then
+        commandJob.cancelled = true
+    end
+    Win32.releaseHeld()
+    if not quitGame then
+        playing = false
+        reverseActive = false
+        writeSharedState("IDLE")
+        logEvent("STARTUP", "script terminated")
+    end
+end
+
 function main()
     MainLoop.initialize()
     MainLoop.startThreads()
@@ -3873,4 +4089,3 @@ function main()
         MainLoop.drawTrailDebug()
     end
 end
-

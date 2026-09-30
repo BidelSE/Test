@@ -1,9 +1,11 @@
 script_name('testdialog_safe')
-script_version('1.4')
+script_version('1.5')
 require 'lib.moonloader'
 
 -- Safe passive watcher. It avoids broad memory scanning because MoonLoader can
 -- kill the coroutine when pcall wraps memory opcodes.
+-- Display only: MoonLoader scripts cannot read each other's globals, so the
+-- bot detects dialogs itself and this overlay publishes nothing.
 
 local samp = 0
 local font = nil
@@ -43,15 +45,22 @@ local function fakeDialogActive()
     return value == "fake_arbotas"
 end
 
-local function publishDialogState(isActive)
-    _G.VR_DIALOG_ACTIVE = isActive
-    _G.VR_DIALOG_TITLE = isActive and "SAMP Dialog" or nil
+-- Just below the hud_aswd box (which spans 20 px above to 84 px below 42% of
+-- the screen height), so the two overlays no longer overlap.
+local function overlayPosition()
+    local x, y = 18, 410
+    if getScreenResolution then
+        local _, sh = getScreenResolution()
+        if sh and sh > 0 then
+            y = math.max(220, math.floor(sh * 0.42)) + 96
+        end
+    end
+    return x, y
 end
 
 function main()
     wait(0)
     samp = getModuleHandle("samp.dll")
-    publishDialogState(false)
 
     while true do
         wait(0)
@@ -62,19 +71,11 @@ function main()
 
         if os.clock() - lastScanTime > 0.10 then
             lastScanTime = os.clock()
-            active = false
-
-            active = realDialogActive()
-
-            if fakeDialogActive() then
-                active = true
-            end
-
-            publishDialogState(active)
+            active = realDialogActive() or fakeDialogActive()
         end
 
         if font then
-            local x, y = 18, 410
+            local x, y = overlayPosition()
             local bg = active and 0xCC661111 or 0xAA111111
             renderDrawBox(x, y, 210, 34, bg)
             renderFontDrawText(font, active and "DIALOG ACTIVE" or "DIALOG inactive", x + 6, y + 5, active and 0xFFFFFF00 or 0xFF888888)
