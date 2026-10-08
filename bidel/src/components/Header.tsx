@@ -1,4 +1,4 @@
-import { Menu, MessageSquare, Plus, User, X, Heart } from 'lucide-react'
+import { CarFront, Menu, MessageSquare, Plus, User, X, Heart } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, NavLink, useLocation } from 'react-router-dom'
 import { useStore } from '../features/AppStore'
@@ -14,7 +14,7 @@ const nav = [
 
 export function Header() {
   const [open, setOpen] = useState(false)
-  const { loggedIn, unreadCount, favorites, profile } = useStore()
+  const { loggedIn, unreadCount, favorites, profile, myCar, setCarDialogOpen } = useStore()
   const location = useLocation()
 
   useEffect(() => setOpen(false), [location.pathname])
@@ -37,6 +37,15 @@ export function Header() {
           ))}
         </nav>
         <div className="ml-auto flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setCarDialogOpen(true)}
+            className={cx('btn h-9 rounded-full border px-3 text-[13px]', myCar ? 'border-brand-200 bg-brand-50 text-brand-800 hover:border-brand-500' : 'border-gray-300 text-gray-700 hover:border-gray-400')}
+            aria-label={myCar ? `Min bil: ${myCar.make} ${myCar.model} ${myCar.year}. Ändra` : 'Välj din bil'}
+          >
+            <CarFront className="h-4 w-4" aria-hidden />
+            <span className="max-w-[9rem] truncate">{myCar ? `${myCar.make} ${myCar.model} · ${myCar.year}` : 'Min bil'}</span>
+          </button>
           <Link to="/konto/sparade" className="btn-ghost hidden h-10 w-10 px-0 sm:inline-flex" aria-label={`Sparade annonser (${favorites.length})`}>
             <Heart className="h-5 w-5" />
           </Link>

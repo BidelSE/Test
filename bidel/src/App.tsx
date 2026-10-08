@@ -3,6 +3,7 @@ import { Route, Routes, useLocation } from 'react-router-dom'
 import { DemoBanner } from './components/DemoBanner'
 import { Footer } from './components/Footer'
 import { Header } from './components/Header'
+import { MyCarDialog } from './components/MyCarDialog'
 import { Toasts } from './components/Toasts'
 import { BrowsePage } from './pages/BrowsePage'
 import { HomePage } from './pages/HomePage'
@@ -62,6 +63,7 @@ export function App() {
         </Routes>
       </main>
       <Footer />
+      <MyCarDialog />
       <Toasts />
     </div>
   )

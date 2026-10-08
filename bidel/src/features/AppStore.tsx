@@ -5,7 +5,7 @@ import { ME_ID, sellers as demoSellers } from '../data/sellers'
 import { useStoredState } from '../hooks/useStoredState'
 import { clearStore } from '../lib/storage'
 import { uid } from '../lib/format'
-import type { Conversation, Listing, Seller, UserProfile, UserSettings } from '../types'
+import type { Conversation, Listing, MyCar, Seller, UserProfile, UserSettings } from '../types'
 
 const defaultProfile: UserProfile = {
   displayName: 'Demo Användare',
@@ -51,6 +51,10 @@ interface Store {
   updateProfile: (p: UserProfile) => void
   settings: UserSettings
   updateSettings: (s: UserSettings) => void
+  myCar: MyCar | null
+  setMyCar: (car: MyCar | null) => void
+  carDialogOpen: boolean
+  setCarDialogOpen: (open: boolean) => void
   loggedIn: boolean
   login: () => void
   logout: () => void
@@ -69,6 +73,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useStoredState<UserProfile>('profile', defaultProfile)
   const [settings, setSettings] = useStoredState<UserSettings>('settings', defaultSettings)
   const [loggedIn, setLoggedIn] = useStoredState<boolean>('loggedIn', false)
+  const [myCar, setMyCar] = useStoredState<MyCar | null>('myCar', null)
+  const [carDialogOpen, setCarDialogOpen] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const replyIndex = useRef(0)
 
@@ -183,6 +189,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     settings,
     updateSettings: setSettings,
     loggedIn,
+    myCar,
+    setMyCar,
+    carDialogOpen,
+    setCarDialogOpen,
     login: () => setLoggedIn(true),
     logout: () => setLoggedIn(false),
     toasts,

@@ -141,3 +141,14 @@ export interface ListingFilters {
   shipping: boolean
   sort: SortKey
 }
+
+/** The vehicle the visitor has saved as "Min bil". */
+export interface MyCar {
+  make: string
+  model: string
+  generation?: string
+  engine?: string
+  year: number
+  /** Set when chosen via a fictional demo plate */
+  demoPlate?: string
+}

@@ -1,4 +1,4 @@
-import { Search, SlidersHorizontal, X, SearchX } from 'lucide-react'
+import { CarFront, Search, SlidersHorizontal, X, SearchX } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Breadcrumbs } from '../components/Breadcrumbs'
@@ -9,6 +9,7 @@ import { VehicleSelects } from '../components/VehicleSelects'
 import { categories, categoryById, cities, conditionLabel, conditions } from '../data/categories'
 import { useStore } from '../features/AppStore'
 import { cx, formatPrice } from '../lib/format'
+import { carLabel } from '../lib/fitment'
 import { applyFilters, countActiveFilters, emptyFilters, filtersFromParams, paramsFromFilters } from '../lib/search'
 import type { CategoryId, ListingFilters, SortKey } from '../types'
 
@@ -22,8 +23,9 @@ const sortOptions: { id: SortKey; label: string }[] = [
 export function BrowsePage() {
   const [params, setParams] = useSearchParams()
   const filters = useMemo(() => filtersFromParams(params), [params])
-  const { listings, sellersById } = useStore()
-  const results = useMemo(() => applyFilters(listings, filters, sellersById), [listings, filters, sellersById])
+  const { listings, sellersById, myCar, setCarDialogOpen } = useStore()
+  const results = useMemo(() => applyFilters(listings, filters, sellersById, myCar), [listings, filters, sellersById, myCar])
+  const carActive = !!myCar && filters.make === myCar.make && filters.model === myCar.model && (!myCar.generation || filters.generation === myCar.generation)
   const [drawer, setDrawer] = useState(false)
   const [q, setQ] = useState(filters.q)
   const [pending, setPending] = useState(false)
@@ -79,6 +81,39 @@ export function BrowsePage() {
             Sök
           </button>
         </form>
+      </div>
+
+      {/* My car */}
+      <div className="mt-5 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-gray-200 bg-surface px-4 py-3 text-sm">
+        <CarFront className="h-5 w-5 shrink-0 text-brand-700" aria-hidden />
+        {myCar ? (
+          <>
+            <span className="min-w-0 flex-1 basis-[calc(100%-2.5rem)] sm:basis-0">
+              <span className="text-gray-600">Min bil: </span>
+              <strong className="font-semibold">{carLabel(myCar)}</strong>
+              {!carActive && <span className="block text-xs text-gray-500 sm:inline sm:pl-2">Annonser från samma modell visas först.</span>}
+            </span>
+            {carActive ? (
+              <button type="button" className="btn-secondary btn-sm" onClick={() => update({ make: '', model: '', generation: '', engine: '', year: '' })}>
+                Visa alla bilar
+              </button>
+            ) : (
+              <button type="button" className="btn-primary btn-sm" onClick={() => update({ make: myCar.make, model: myCar.model, generation: myCar.generation ?? '', engine: '', year: '' })}>
+                Visa delar till min bil
+              </button>
+            )}
+            <button type="button" className="text-xs font-medium text-gray-600 underline underline-offset-2 hover:text-ink" onClick={() => setCarDialogOpen(true)}>
+              Ändra
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="min-w-0 flex-1 text-gray-700">Spara din bil så ser du vilka annonser som kommer från samma modell och motor.</span>
+            <button type="button" className="btn-secondary btn-sm" onClick={() => setCarDialogOpen(true)}>
+              Välj din bil
+            </button>
+          </>
+        )}
       </div>
 
       {/* Category quick filter */}

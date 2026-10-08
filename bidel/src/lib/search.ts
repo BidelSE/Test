@@ -1,5 +1,6 @@
 import { categoryById } from '../data/categories'
-import type { Condition, Listing, ListingFilters, Seller, SellerType, SortKey } from '../types'
+import type { Condition, Listing, ListingFilters, MyCar, Seller, SellerType, SortKey } from '../types'
+import { matchLevel } from './fitment'
 
 export const emptyFilters: ListingFilters = {
   q: '',
@@ -107,7 +108,9 @@ function scoreListing(l: Listing, tokens: string[], seller?: Seller): number {
   return score
 }
 
-export function applyFilters(listings: Listing[], f: ListingFilters, sellersById: Record<string, Seller>): Listing[] {
+const MATCH_BOOST = { engine: 6, generation: 4, model: 2, none: 0 } as const
+
+export function applyFilters(listings: Listing[], f: ListingFilters, sellersById: Record<string, Seller>, car: MyCar | null = null): Listing[] {
   const tokens = norm(f.q).split(/\s+/).filter(Boolean)
   const year = parseInt(f.year, 10)
   const min = parseInt(f.priceMin, 10)
@@ -131,6 +134,8 @@ export function applyFilters(listings: Listing[], f: ListingFilters, sellersById
     .filter((l) => !f.shipping || l.shipping)
     .map((l) => ({ l, s: scoreListing(l, tokens, sellersById[l.sellerId]) }))
     .filter((x) => x.s > 0)
+    // Listings from the visitor's own car model rank higher under "Relevans".
+    .map((x) => ({ ...x, s: x.s + MATCH_BOOST[matchLevel(car, x.l.vehicle) ?? 'none'] }))
 
   const byDate = (a: Listing, b: Listing) => b.createdAt.localeCompare(a.createdAt)
   switch (f.sort) {

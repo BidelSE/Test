@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, Check, ChevronLeft, ChevronRight, Flag, MapPin, MessageSquare, Package, Share2, Store, Truck, X } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, CarFront, Check, ChevronLeft, ChevronRight, Flag, MapPin, MessageSquare, Package, Share2, Store, Truck, X } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Breadcrumbs } from '../components/Breadcrumbs'
@@ -12,10 +12,11 @@ import { categoryById, conditions } from '../data/categories'
 import { useStore } from '../features/AppStore'
 import { cx, formatDate, formatMileage, formatPrice, vehicleLabel } from '../lib/format'
 import { NotFoundPage } from './NotFoundPage'
+import { carLabel, matchCopy, matchLevel } from '../lib/fitment'
 
 export function ListingPage() {
   const { id } = useParams()
-  const { getListing, sellersById, listings, startConversation, toast } = useStore()
+  const { getListing, sellersById, listings, startConversation, toast, myCar, setCarDialogOpen } = useStore()
   const navigate = useNavigate()
   const location = useLocation()
   const listing = id ? getListing(id) : undefined
@@ -154,6 +155,21 @@ export function ListingPage() {
                   {vehicleLabel(listing.vehicle)}, {listing.vehicle.year}
                 </p>
                 {listing.donorMileageKm && <p className="mt-0.5 text-sm text-gray-600">Givarbilen hade gått {formatMileage(listing.donorMileageKm)}</p>}
+              </div>
+              <div className="flex flex-wrap items-start gap-3 border-b border-gray-200 p-4">
+                <CarFront className="mt-0.5 h-4 w-4 shrink-0 text-brand-700" aria-hidden />
+                {myCar ? (
+                  <div className="min-w-0 flex-1 text-sm">
+                    <p className="eyebrow">Jämfört med din bil</p>
+                    <p className="mt-1 font-medium">{carLabel(myCar)}</p>
+                    <p className="mt-0.5 text-gray-700">{(() => { const m = matchLevel(myCar, listing.vehicle); return m ? matchCopy[m].long : 'Givarbilen är inte samma modell eller generation som din bil.' })()}</p>
+                  </div>
+                ) : (
+                  <p className="min-w-0 flex-1 text-sm text-gray-700">Spara din bil för att se hur givarbilen skiljer sig från den.</p>
+                )}
+                <button type="button" className="btn-secondary btn-sm" onClick={() => setCarDialogOpen(true)}>
+                  {myCar ? 'Ändra bil' : 'Välj din bil'}
+                </button>
               </div>
               <div className="p-4">
                 <p className="eyebrow">Säljarens kommentar om passform</p>

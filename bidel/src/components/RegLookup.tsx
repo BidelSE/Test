@@ -10,7 +10,7 @@ type DemoVehicle = (typeof demoPlates)[string]
  * Placeholder for a future registration-number lookup. No external service is
  * called; only the clearly fictional plates in `demoPlates` resolve.
  */
-export function RegLookup({ onVehicle, compact }: { onVehicle: (v: DemoVehicle) => void; compact?: boolean }) {
+export function RegLookup({ onVehicle, compact, actionLabel = 'Ja, visa delar' }: { onVehicle: (v: DemoVehicle) => void; compact?: boolean; actionLabel?: string }) {
   const [plate, setPlate] = useState('')
   const [result, setResult] = useState<null | { found: DemoVehicle | null; plate: string }>(null)
 
@@ -81,7 +81,7 @@ export function RegLookup({ onVehicle, compact }: { onVehicle: (v: DemoVehicle) 
               </p>
               <p className="mt-1 text-xs text-gray-600">Stämmer fordonet? Resultaten filtreras på märke, modell och år – inte på verifierad passform.</p>
               <button type="button" className="btn-primary btn-sm mt-3" onClick={() => onVehicle(result.found!)}>
-                Ja, visa delar
+                {actionLabel}
               </button>
             </>
           ) : (

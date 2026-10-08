@@ -5,6 +5,7 @@ import { formatPrice, relativeDate, vehicleLabel } from '../lib/format'
 import type { Listing } from '../types'
 import { ConditionBadge } from './ConditionBadge'
 import { FavoriteButton } from './FavoriteButton'
+import { MatchBadge } from './MatchBadge'
 import { PartImage } from './PartImage'
 import { SellerTypeBadge } from './SellerTypeBadge'
 
@@ -32,6 +33,7 @@ export function ListingCard({ listing }: { listing: Listing }) {
         <p className="mt-1 text-xs text-gray-600">
           Från: {vehicleLabel(listing.vehicle)} · {listing.vehicle.year}
         </p>
+        <MatchBadge vehicle={listing.vehicle} className="mt-2 self-start" />
         <div className="mt-auto flex items-center justify-between gap-2 pt-3 text-xs text-gray-500">
           <span className="inline-flex min-w-0 items-center gap-1">
             <MapPin className="h-3.5 w-3.5 shrink-0" aria-hidden />

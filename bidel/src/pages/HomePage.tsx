@@ -1,4 +1,4 @@
-import { ArrowRight, Recycle, Search } from 'lucide-react'
+import { ArrowRight, CarFront, Recycle, Search } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { CategoryIcon } from '../components/CategoryIcon'
@@ -7,13 +7,14 @@ import { RegLookup } from '../components/RegLookup'
 import { VehicleSelects, type VehicleValue } from '../components/VehicleSelects'
 import { categories } from '../data/categories'
 import { useStore } from '../features/AppStore'
+import { carLabel } from '../lib/fitment'
 import { paramsFromFilters } from '../lib/search'
 
 const popular = ['Audi A4 turbo', 'Volvo V70 strålkastare', 'Golf spegel', 'E90 bromsok', 'Saab 9-3 turbo']
 
 export function HomePage() {
   const navigate = useNavigate()
-  const { listings } = useStore()
+  const { listings, myCar } = useStore()
   const [q, setQ] = useState('')
   const [vehicle, setVehicle] = useState<VehicleValue>({ make: '', model: '', year: '' })
 
@@ -66,6 +67,18 @@ export function HomePage() {
                 </button>
               </div>
             </form>
+            {myCar && (
+              <Link
+                to={`/bildelar?${paramsFromFilters({ make: myCar.make, model: myCar.model, generation: myCar.generation ?? '' })}`}
+                className="mt-4 flex items-center gap-2 rounded-lg border border-brand-200 bg-white px-4 py-3 text-sm hover:border-brand-500"
+              >
+                <CarFront className="h-5 w-5 shrink-0 text-brand-700" aria-hidden />
+                <span className="min-w-0 flex-1">
+                  Delar från samma modell som din <strong className="font-semibold">{carLabel(myCar)}</strong>
+                </span>
+                <ArrowRight className="h-4 w-4 shrink-0 text-brand-700" aria-hidden />
+              </Link>
+            )}
             <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
               <span className="text-gray-500">Populärt:</span>
               {popular.map((p) => (
