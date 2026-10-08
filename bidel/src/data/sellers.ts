@@ -15,8 +15,8 @@ export const sellers: Seller[] = [
     description:
       'Demonterar personbilar med fokus på svenska och tyska märken. Delarna testas i den mån det går innan demontering och märks med givarbilens uppgifter.',
     memberSince: '2025-03-01',
-    website: 'exempel.se',
-    businessEmail: 'kontakt@exempel.se',
+    website: 'norrkust.example',
+    businessEmail: 'kontakt@norrkust.example',
     openingHours: 'Mån–fre 08–16',
   },
   {
@@ -29,8 +29,8 @@ export const sellers: Seller[] = [
     description:
       'Begagnade reservdelar till Volvo, Saab och VAG-koncernens bilar. Vi skickar mindre delar med paket och har upphämtning på plats.',
     memberSince: '2025-05-12',
-    website: 'exempel.se',
-    businessEmail: 'info@exempel.se',
+    website: 'malardalensbildelar.example',
+    businessEmail: 'info@malardalensbildelar.example',
     openingHours: 'Mån–fre 07–16, lör 10–13',
   },
   {

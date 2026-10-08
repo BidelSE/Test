@@ -20,9 +20,9 @@ export function ListingCard({ listing }: { listing: Listing }) {
         {listing.status === 'sold' && <span className="absolute left-2.5 top-2.5 rounded bg-ink px-2 py-0.5 text-xs font-semibold text-white">Såld</span>}
       </div>
       <div className="flex flex-1 flex-col p-3.5">
-        <div className="flex items-start justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
           <p className="text-[17px] font-semibold tabular-nums tracking-tight">{formatPrice(listing.price)}</p>
-          <ConditionBadge condition={listing.condition} className="mt-0.5 shrink-0" />
+          <ConditionBadge condition={listing.condition} className="shrink-0" />
         </div>
         <h3 className="mt-1 line-clamp-2 text-sm font-medium leading-snug text-ink">
           <Link to={`/annons/${listing.id}`} state={{ from: location.pathname + location.search }} className="after:absolute after:inset-0 focus-visible:outline-none group-focus-within:underline">

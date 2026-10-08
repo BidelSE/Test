@@ -9,7 +9,7 @@ import type { Conversation, Listing, Seller, UserProfile, UserSettings } from '.
 
 const defaultProfile: UserProfile = {
   displayName: 'Demo Användare',
-  email: 'demo@exempel.se',
+  email: 'demo@bidel.example',
   phone: '070-000 00 00',
   city: 'Stockholm',
   postalCode: '118 46',

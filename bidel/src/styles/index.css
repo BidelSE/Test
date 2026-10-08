@@ -56,3 +56,13 @@
 }
 
 textarea.input { height: auto; padding-top: 0.5rem; padding-bottom: 0.5rem; }
+
+.prose-bidel h2 { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.01em; margin-top: 2.5rem; scroll-margin-top: 6rem; }
+.prose-bidel h2:first-child { margin-top: 0; }
+.prose-bidel h3 { font-size: 1rem; font-weight: 600; margin-top: 1.5rem; }
+.prose-bidel p, .prose-bidel li { font-size: 0.975rem; line-height: 1.7; color: #374151; }
+.prose-bidel p { margin-top: 0.75rem; }
+.prose-bidel ul { margin-top: 0.75rem; padding-left: 1.25rem; list-style: disc; }
+.prose-bidel ol { margin-top: 0.75rem; padding-left: 1.25rem; list-style: decimal; }
+.prose-bidel li { margin-top: 0.35rem; }
+.prose-bidel a { color: var(--color-brand-700); text-decoration: underline; text-underline-offset: 2px; }

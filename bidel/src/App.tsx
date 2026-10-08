@@ -8,10 +8,26 @@ import { BrowsePage } from './pages/BrowsePage'
 import { HomePage } from './pages/HomePage'
 import { ListingPage } from './pages/ListingPage'
 import { NotFoundPage } from './pages/NotFoundPage'
+import { AboutPage } from './pages/AboutPage'
+import { AccountLayout } from './pages/account/AccountLayout'
+import { ContactPage } from './pages/ContactPage'
+import { FaqPage } from './pages/FaqPage'
+import { HowItWorksPage } from './pages/HowItWorksPage'
+import { LegalPage } from './pages/LegalPage'
+import { LoginPage } from './pages/LoginPage'
+import { SellerPage } from './pages/SellerPage'
+import { SellFormPage } from './pages/SellFormPage'
+import { SellLandingPage } from './pages/SellLandingPage'
 
 function ScrollToTop() {
-  const { pathname } = useLocation()
-  useEffect(() => window.scrollTo(0, 0), [pathname])
+  const { pathname, hash } = useLocation()
+  useEffect(() => {
+    if (hash) {
+      requestAnimationFrame(() => document.getElementById(hash.slice(1))?.scrollIntoView())
+      return
+    }
+    window.scrollTo(0, 0)
+  }, [pathname, hash])
   return null
 }
 
@@ -29,6 +45,19 @@ export function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/bildelar" element={<BrowsePage />} />
           <Route path="/annons/:id" element={<ListingPage />} />
+          <Route path="/salj" element={<SellLandingPage />} />
+          <Route path="/salj/ny" element={<SellFormPage />} />
+          <Route path="/salj/redigera/:id" element={<SellFormPage />} />
+          <Route path="/saljare/:id" element={<SellerPage />} />
+          <Route path="/logga-in" element={<LoginPage />} />
+          <Route path="/konto/*" element={<AccountLayout />} />
+          <Route path="/om-bidel" element={<AboutPage />} />
+          <Route path="/sa-fungerar-det" element={<HowItWorksPage />} />
+          <Route path="/vanliga-fragor" element={<FaqPage />} />
+          <Route path="/kontakt" element={<ContactPage />} />
+          <Route path="/integritetspolicy" element={<LegalPage page="integritet" />} />
+          <Route path="/anvandarvillkor" element={<LegalPage page="villkor" />} />
+          <Route path="/cookies" element={<LegalPage page="cookies" />} />
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </main>

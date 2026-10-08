@@ -30,7 +30,7 @@ export function PartImage({ listing, index = 0, className, size = 'md' }: { list
       </svg>
       <CategoryIcon id={listing.categoryId} className={cx('relative', size === 'lg' ? 'h-20 w-20' : size === 'sm' ? 'h-8 w-8' : 'h-12 w-12')} />
       {size !== 'sm' && (
-        <span className="relative mt-3 text-[11px] font-medium uppercase tracking-wider text-gray-400">
+        <span className="relative mt-3 hidden text-[11px] sm:block font-medium uppercase tracking-wider text-gray-400">
           {cat?.short} · {index === 0 ? 'Bild saknas' : views[index % views.length]}
         </span>
       )}
