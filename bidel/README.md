@@ -44,3 +44,8 @@ Allt sparas i webbläsarens localStorage. Återställ under Mitt konto → Inst�
 Riktig inloggning, databas, betalning och köparskydd, sökning på registreringsnummer,
 VIN-avkodning och passformsmatchning, fraktbokning, realtidschatt, e-post och lagerintegration
 för bildemonteringar.
+
+## Enfilsversion
+
+`npm run build:single` bygger en fristående HTML-fil (`dist-single/bidel.html`) med hash-routing
+och inbäddad CSS/JS, för att kunna visas där det inte finns någon server, t.ex. som artifact.

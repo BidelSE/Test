@@ -46,10 +46,14 @@ export function ListingPage() {
         await navigator.share({ title: listing.title, url })
         return
       }
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') return
+    }
+    try {
       await navigator.clipboard.writeText(url)
       toast('Länken kopierades', 'success')
     } catch {
-      /* user cancelled */
+      toast('Kunde inte dela. Kopiera adressen från webbläsaren.', 'error')
     }
   }
 

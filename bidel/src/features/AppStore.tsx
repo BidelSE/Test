@@ -156,7 +156,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
 
   const resetDemo = () => {
     clearStore()
-    window.location.assign('/')
+    if (import.meta.env.VITE_HASH_ROUTER) {
+      window.location.hash = '/'
+      window.location.reload()
+    } else window.location.assign('/')
   }
 
   const value: Store = {
